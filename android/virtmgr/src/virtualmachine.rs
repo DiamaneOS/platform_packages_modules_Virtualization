@@ -758,8 +758,8 @@ impl VirtualizationService {
             config
                 .disks
                 .iter()
-                .flat_map(|disk| disk.image.as_ref())
-                .try_for_each(|image| check_label_for_file(image, "disk image", calling_partition))
+                .filter_map(|disk| disk.image.as_ref().map(|image| (image, disk.writable)))
+                .try_for_each(|(image, writable)| check_label_for_disk(image, writable, calling_partition))
                 .or_service_specific_exception(-1)?;
             config
                 .disks
@@ -1450,9 +1450,6 @@ fn check_label_is_allowed(context: &SeContext, calling_partition: CallingPartiti
         | "virtualizationservice_data_file" // files created by VS / VirtMgr
         | "vendor_microdroid_file" // immutable dm-verity protected partition (/vendor/etc/avf/microdroid/.*)
          => Ok(()),
-        // DiamaneOS: the block device of an SD card or USB drive, from fsvmd only. The filesystem VM's kernel parses
-        // it so that Android's does not. It holds no code the VM runs.
-        "vold_device" if is_fsvmd_caller() => Ok(()),
         // It is difficult to require specific label types for vendor initiated VM's files.
         _ if calling_partition == CallingPartition::Vendor => Ok(()),
         _ => bail!("Label {} is not allowed", context),
@@ -1487,6 +1484,26 @@ fn check_label_for_kernel_files(
     }
     Ok(())
 }
+/// DiamaneOS: disks fsvmd may pass besides the usual labels. The filesystem VM's kernel parses them so that
+/// Android's does not, and they hold no code the VM runs: the block device of an SD card or USB drive
+/// (`vold_device`), and an app's OBB image (`media_rw_data_file`), read-only.
+fn check_label_for_disk(
+    file: &impl AsRawFd,
+    writable: bool,
+    calling_partition: CallingPartition,
+) -> Result<()> {
+    let context = getfilecon(file)?;
+    if is_fsvmd_caller() {
+        match context.selinux_type()? {
+            "vold_device" => return Ok(()),
+            "media_rw_data_file" if !writable => return Ok(()),
+            "media_rw_data_file" => bail!("fsvmd passed a writable OBB image"),
+            _ => {}
+        }
+    }
+    check_label_is_allowed(&context, calling_partition).with_context(|| "disk image file invalid")
+}
+
 fn check_label_for_file(
     file: &impl AsRawFd,
     name: &str,
