@@ -827,8 +827,21 @@ impl CrosvmCommand {
                 bail!("DiskImage {:?} didn't contain image or partitions.", disk);
             };
 
+            // DiamaneOS: a vold block device (an SD card or USB drive) is always raw. Its first bytes come from
+            // whoever made the card and must never make crosvm parse it as qcow2, composite or sparse. A file whose
+            // label cannot be read is treated the same way.
+            let raw_only = match &disk.image {
+                Some(f) => match crate::selinux::getfilecon(f) {
+                    Ok(c) => c.selinux_type().map(|t| t == "vold_device").unwrap_or(true),
+                    Err(_) => true,
+                },
+                None => false,
+            };
             let path = self.add_preserved_fd(image);
             let mut block_arg = format!("path={},ro={},lock=false", path, !disk.writable);
+            if raw_only {
+                block_arg.push_str(",raw=true");
+            }
             if let Some(id) = &disk.id {
                 block_arg.push_str(&format!(",id={}", id));
             }

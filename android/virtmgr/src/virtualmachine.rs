@@ -1450,10 +1450,19 @@ fn check_label_is_allowed(context: &SeContext, calling_partition: CallingPartiti
         | "virtualizationservice_data_file" // files created by VS / VirtMgr
         | "vendor_microdroid_file" // immutable dm-verity protected partition (/vendor/etc/avf/microdroid/.*)
          => Ok(()),
+        // DiamaneOS: the block device of an SD card or USB drive, from fsvmd only. The filesystem VM's kernel parses
+        // it so that Android's does not. It holds no code the VM runs.
+        "vold_device" if is_fsvmd_caller() => Ok(()),
         // It is difficult to require specific label types for vendor initiated VM's files.
         _ if calling_partition == CallingPartition::Vendor => Ok(()),
         _ => bail!("Label {} is not allowed", context),
     }
+}
+
+/// DiamaneOS: whether the caller is fsvmd, which serves SD cards and USB drives from the filesystem VM.
+fn is_fsvmd_caller() -> bool {
+    matches!(CALLING_EXE_PATH.as_deref(),
+        Some(p) if p == Path::new("/system_ext/bin/fsvmd") || p == Path::new("/system/system_ext/bin/fsvmd"))
 }
 
 fn check_label_for_partition(

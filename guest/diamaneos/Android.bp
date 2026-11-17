@@ -1,0 +1,73 @@
+// Copyright (C) 2026 DiamaneOS
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// DiamaneOS guest kernel: kernel_common-6.18 with microdroid_defconfig plus seccomp, FAT, exFAT and MBR and GPT
+// partitions, without modules (kernel/guest.config). It boots the DiamaneOS VMs, each signed together with its own
+// initramfs the way Microdroid's kernel is.
+
+package {
+    default_applicable_licenses: ["Android-Apache-2.0"],
+}
+
+filegroup {
+    name: "diamaneos_guest_kernel_prebuilt",
+    srcs: ["kernel/arm64/Image"],
+}
+
+// The filesystem VM (vendor/diamaneos/fsvm). It has no debuggable variant, so the same initramfs stands for both
+// descriptors pvmfw knows.
+avb_gen_vbmeta_image {
+    name: "fsvm_initrd_normal_hashdesc",
+    defaults: ["microdroid_initrd_normal_defaults"],
+    src: ":fsvm_guest_initrd",
+}
+
+avb_gen_vbmeta_image {
+    name: "fsvm_initrd_debug_hashdesc",
+    defaults: ["microdroid_initrd_debug_defaults"],
+    src: ":fsvm_guest_initrd",
+}
+
+avb_add_hash_footer {
+    name: "fsvm_kernel_signed",
+    defaults: ["microdroid_kernel_signed_defaults"],
+    filename: "fsvm_kernel",
+    arch: {
+        arm64: {
+            src: ":diamaneos_guest_kernel_prebuilt",
+        },
+    },
+    include_descriptors_from_images: [
+        ":fsvm_initrd_normal_hashdesc",
+        ":fsvm_initrd_debug_hashdesc",
+    ],
+}
+
+prebuilt_etc {
+    name: "fsvm_kernel",
+    src: ":empty_file",
+    relative_install_path: "fs",
+    filename: "fsvm_kernel",
+    arch: {
+        arm64: {
+            src: ":fsvm_kernel_signed",
+        },
+    },
+}
+
+prebuilt_etc {
+    name: "fsvm_initrd",
+    src: ":fsvm_guest_initrd",
+    filename: "fsvm_initrd.img",
+}
