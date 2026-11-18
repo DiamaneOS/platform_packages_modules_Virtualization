@@ -63,6 +63,26 @@ prebuilt_etc {
 
 prebuilt_etc {
     name: "decoder_vm_initrd_apex",
-    src: ":decoder_vm_initrd",
+    src: ":decoder_vm_initrd_api_checked",
     filename: "decoder_vm_initrd.img",
+}
+
+// The decode service reaches the hidden raw VM API by reflection. This twin makes the same calls directly
+// (apitwin/, keep it in step with the service's GuestVm.rawConfig), never installed.
+java_library {
+    name: "decoder_vm_api_twin",
+    srcs: ["apitwin/src/**/*.java"],
+    libs: ["framework-virtualization.impl"],
+    platform_apis: true,
+    installable: false,
+}
+
+// The initramfs as it goes into the APEX, unchanged, once the twin compiled: an upstream change to the hidden API
+// fails the APEX build instead of showing only at run time.
+genrule {
+    name: "decoder_vm_initrd_api_checked",
+    srcs: [":decoder_vm_initrd"],
+    device_common_srcs: [":decoder_vm_api_twin"],
+    out: ["decoder_vm_initrd.img"],
+    cmd: "cp $(location :decoder_vm_initrd) $(out)",
 }
