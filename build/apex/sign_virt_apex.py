@@ -631,14 +631,51 @@ def TargetFiles(input_dir):
         ret['16k_initrd_normal.img'] = initrd_normal_16k
         ret['16k_initrd_debuggable.img'] = initrd_debug_16k
 
-    # DiamaneOS: the decode service VM's kernel and its initramfs (guest/decoder_vm). The initramfs carries no
-    # bootconfig, so its key must not end in initrd_normal.img or initrd_debuggable.img (IsInitrdImage).
-    decoder_kernel = os.path.join(input_dir, 'etc/fs/decoder_vm_kernel')
-    if os.path.isfile(decoder_kernel):
-        ret['decoder_vm_kernel'] = decoder_kernel
-        ret['decoder_vm_initrd'] = os.path.join(input_dir, 'etc/decoder_vm_initrd.img')
+    ret.update(DecoderVmFiles(input_dir))
 
     return ret
+
+def DecoderVmFiles(input_dir):
+    """DiamaneOS: the decode service VM's kernel and its initramfs (guest/decoder_vm), as TargetFiles keys.
+
+    The kernel is an empty file where the VM is not built (every arch but arm64), and then nothing is signed. A
+    missing kernel, or a kernel without its initramfs, is an error: signing everything else would ship a kernel
+    that pvmfw refuses, which shows only on a phone. The initramfs carries no bootconfig, so its key must not end in
+    initrd_normal.img or initrd_debuggable.img (IsInitrdImage).
+    """
+    kernel = os.path.join(input_dir, 'etc/fs/decoder_vm_kernel')
+    initrd = os.path.join(input_dir, 'etc/decoder_vm_initrd.img')
+    if not os.path.isfile(kernel):
+        raise ValueError(f'the decode service VM kernel is missing: {kernel}')
+    if os.path.getsize(kernel) == 0:
+        return {}
+    if not os.path.isfile(initrd):
+        raise ValueError(f'the decode service VM initramfs is missing: {initrd}')
+    return {'decoder_vm_kernel': kernel, 'decoder_vm_initrd': initrd}
+
+
+def VerifyDecoderVmKernel(args, key, kernel_file, initrd_file):
+    """DiamaneOS: the decode service VM's kernel carries the key's signature and, in both descriptors pvmfw knows
+    (initrd_normal, initrd_debug), the digest of the initramfs next to it."""
+    key = args.key_overrides.get(os.path.basename(kernel_file), key)
+    info, descriptors = AvbInfo(args, kernel_file)
+    assert info is not None, f'no avbinfo: {kernel_file}'
+    with tempfile.NamedTemporaryFile() as pubkey_file:
+        ExtractAvbPubkey(args, key, pubkey_file.name)
+        with open(pubkey_file.name, 'rb') as f:
+            pubkey_digest = hashlib.sha1(f.read()).hexdigest()
+    assert info['Public key (sha1)'] == pubkey_digest, f'pubkey mismatch: {kernel_file}'
+    with open(initrd_file, 'rb') as f:
+        initrd = f.read()
+    hashes = extract_hash_descriptors(descriptors)
+    for name in ('initrd_normal', 'initrd_debug'):
+        assert name in hashes, f'no {name} descriptor in {kernel_file}'
+        d = hashes[name]
+        assert d['Hash Algorithm'] == 'sha256', f'{name} of {kernel_file}: {d["Hash Algorithm"]}'
+        assert ReadBytesSize(d['Image Size']) == len(initrd), f'{name} of {kernel_file}: size'
+        digest = hashlib.sha256(bytes.fromhex(d['Salt']) + initrd).hexdigest()
+        assert d['Digest'] == digest, f'{name} of {kernel_file} does not match {initrd_file}'
+
 
 def IsInitrdImage(path):
     return path.endswith('initrd_normal.img') or path.endswith('initrd_debuggable.img')
@@ -734,8 +771,12 @@ def SignVirtApex(args):
     # DiamaneOS: sign the decode service VM's kernel again over its unchanged initramfs. It is left out of
     # original_kernels on purpose: the service VM holds no digests of it, and its initramfs digests do not change,
     # which update_initrd_digests_in_service_vm would reject.
+    # The result is checked against the key and the initramfs before the APEX is packed.
     if 'decoder_vm_kernel' in files:
-        resign_kernel_tasks.append(resign_kernel('decoder_vm_kernel', 'decoder_vm_initrd', 'decoder_vm_initrd'))
+        decoder_task = resign_kernel('decoder_vm_kernel', 'decoder_vm_initrd', 'decoder_vm_initrd')
+        resign_kernel_tasks.append(decoder_task)
+        Async(VerifyDecoderVmKernel, args, key, files['decoder_vm_kernel'], files['decoder_vm_initrd'],
+              wait=[decoder_task])
 
     for ver in gki_versions:
         if f'gki-{ver}_kernel' in files:
@@ -871,6 +912,12 @@ def VerifyVirtApex(args):
             continue
         if k == 'service_vm' and not os.path.exists(f):
             # service_vm only exists in arm64 environment.
+            continue
+        if k == 'decoder_vm_initrd':
+            # DiamaneOS: no footer of its own, checked through its kernel's descriptors below.
+            continue
+        if k == 'decoder_vm_kernel':
+            Async(VerifyDecoderVmKernel, args, key, f, files['decoder_vm_initrd'])
             continue
         if k == 'super.img':
             Async(check_avb_pubkey, system_a_img)

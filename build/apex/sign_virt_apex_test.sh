@@ -25,6 +25,10 @@ PATH=$TEST_DIR:$PATH
 DEBUGFS=$TEST_DIR/debugfs_static
 FSCKEROFS=$TEST_DIR/fsck.erofs
 
+# DiamaneOS: the decode service VM's signing steps on a throwaway tree (sign_virt_apex_decoder_test.py).
+echo "Checking the decode service VM signing steps ..."
+python3 $TEST_DIR/sign_virt_apex_decoder_test.py
+
 echo "Extracting the virt apex ..."
 deapexer --debugfs_path $DEBUGFS --fsckerofs_path $FSCKEROFS \
   extract $TEST_DIR/com.android.virt.apex $TMP_ROOT
@@ -34,6 +38,19 @@ if [ "$(ls -A $TMP_ROOT/etc/fs/)" ]; then
   sign_virt_apex -v $TEST_DIR/test.com.android.virt.pem $TMP_ROOT
   echo "Verifying the contents ..."
   sign_virt_apex -v --verify $TEST_DIR/test.com.android.virt.pem $TMP_ROOT
+  # DiamaneOS: the decode service VM's kernel is checked against its initramfs, and its absence fails the signing.
+  if [ -s $TMP_ROOT/etc/fs/decoder_vm_kernel ]; then
+    echo "Verifying that a changed decode service VM initramfs is refused ..."
+    printf 'x' | dd of=$TMP_ROOT/etc/decoder_vm_initrd.img bs=1 count=1 conv=notrunc status=none
+    if sign_virt_apex --verify $TEST_DIR/test.com.android.virt.pem $TMP_ROOT; then
+      echo "FAIL: a changed decode service VM initramfs passed"; exit 1
+    fi
+  fi
+  echo "Verifying that signing fails without the decode service VM kernel ..."
+  rm -f $TMP_ROOT/etc/fs/decoder_vm_kernel
+  if sign_virt_apex $TEST_DIR/test.com.android.virt.pem $TMP_ROOT; then
+    echo "FAIL: signed without the decode service VM kernel"; exit 1
+  fi
   echo "Done."
 else
   echo "No filesystem images. Skip."

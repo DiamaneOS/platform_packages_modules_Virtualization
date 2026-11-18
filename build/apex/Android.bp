@@ -320,6 +320,10 @@ sh_test_host {
     ],
     data: [
         ":test.com.android.virt.pem",
+        // DiamaneOS: the decode service VM's signing steps (sign_virt_apex_decoder_test.py).
+        ":test2.com.android.virt.pem",
+        "sign_virt_apex.py",
+        "sign_virt_apex_decoder_test.py",
     ],
     device_common_data: [
         ":com.android.virt",
