@@ -844,6 +844,18 @@ impl CrosvmCommand {
             let mut block_arg = format!("path={},ro={},lock=false", path, !disk.writable);
             if raw_only {
                 block_arg.push_str(",raw=true");
+                // DiamaneOS: keep a disk's 4096-byte logical blocks, so that the VM reads its table as written.
+                if let Some(f) = &disk.image {
+                    use std::os::fd::AsRawFd as _;
+                    const BLKSSZGET: libc::c_ulong = 0x1268;
+                    let mut size: libc::c_int = 0;
+                    // SAFETY: BLKSSZGET writes one int through the pointer. The descriptor stays open meanwhile, and
+                    // a descriptor that is not a block device only makes the call fail.
+                    let r = unsafe { libc::ioctl(f.as_ref().as_raw_fd(), BLKSSZGET as _, &mut size) };
+                    if r == 0 && size == 4096 {
+                        block_arg.push_str(",block_size=4096");
+                    }
+                }
             }
             if let Some(id) = &disk.id {
                 block_arg.push_str(&format!(",id={}", id));
