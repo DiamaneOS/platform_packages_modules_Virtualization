@@ -383,7 +383,13 @@ impl CrosvmCommand {
                     Some(get_num_cpus().context("can't get number of CPUs")?)
                 }
             }
-            aidl::CpuTopology::CpuCount(count) => Some((*count).try_into().unwrap()),
+            // DiamaneOS: raw VMs may ask for a vCPU count (VirtualMachineCustomImageConfig.setCpuCount). One
+            // vCPU, upstream's only use, never needs the host's CPU count.
+            aidl::CpuTopology::CpuCount(1) => Some(1),
+            aidl::CpuTopology::CpuCount(count) => {
+                let host = get_num_cpus().context("can't get number of CPUs")?;
+                Some(checked_cpu_count(*count, host)?)
+            }
         };
 
         let mut cpu_args = Vec::new();
@@ -2643,9 +2649,28 @@ fn estimate_swiotlb_usage_mib(inputs: SwiotlbEstimateInputs) -> u32 {
     total.div_ceil(1024 * 1024)
 }
 
+/// DiamaneOS: an explicit vCPU count must be at least one and at most the host's CPUs.
+fn checked_cpu_count(count: i32, host: usize) -> Result<usize> {
+    match usize::try_from(count) {
+        Ok(n) if n >= 1 && n <= host => Ok(n),
+        _ => bail!("invalid vCPU count {count}: it must be from 1 to {host}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_checked_cpu_count() {
+        assert_eq!(checked_cpu_count(1, 8).unwrap(), 1);
+        assert_eq!(checked_cpu_count(2, 8).unwrap(), 2);
+        assert_eq!(checked_cpu_count(8, 8).unwrap(), 8);
+        assert!(checked_cpu_count(0, 8).is_err());
+        assert!(checked_cpu_count(-1, 8).is_err());
+        assert!(checked_cpu_count(9, 8).is_err());
+        assert!(checked_cpu_count(i32::MAX, 8).is_err());
+    }
 
     #[test]
     fn test_estimate_swiotlb() {
