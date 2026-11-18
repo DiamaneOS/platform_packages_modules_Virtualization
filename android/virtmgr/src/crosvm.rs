@@ -2753,12 +2753,12 @@ mod tests {
     }
 }
 
-/// DiamaneOS: whether this VM manager serves fsvmd (vendor/diamaneos fsvm), the filesystem VM's host side. Each client
-/// starts its own VM manager, whose previous context is the client's.
+/// DiamaneOS: whether this VM manager serves fsvmd or fsvmd_obb (vendor/diamaneos fsvm), the filesystem VM's host
+/// side. Each client starts its own VM manager, whose previous context is the client's.
 fn filesystem_vm_caller() -> bool {
     crate::selinux::getprevcon()
         .ok()
-        .and_then(|c| c.selinux_type().ok().map(|t| t == "fsvmd"))
+        .and_then(|c| c.selinux_type().ok().map(|t| t == "fsvmd" || t == "fsvmd_obb"))
         .unwrap_or(false)
 }
 
