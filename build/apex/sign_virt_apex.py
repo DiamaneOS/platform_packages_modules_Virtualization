@@ -631,6 +631,13 @@ def TargetFiles(input_dir):
         ret['16k_initrd_normal.img'] = initrd_normal_16k
         ret['16k_initrd_debuggable.img'] = initrd_debug_16k
 
+    # DiamaneOS: the decode service VM's kernel and its initramfs (guest/decoder_vm). The initramfs carries no
+    # bootconfig, so its key must not end in initrd_normal.img or initrd_debuggable.img (IsInitrdImage).
+    decoder_kernel = os.path.join(input_dir, 'etc/fs/decoder_vm_kernel')
+    if os.path.isfile(decoder_kernel):
+        ret['decoder_vm_kernel'] = decoder_kernel
+        ret['decoder_vm_initrd'] = os.path.join(input_dir, 'etc/decoder_vm_initrd.img')
+
     return ret
 
 def IsInitrdImage(path):
@@ -723,6 +730,12 @@ def SignVirtApex(args):
     _, original_kernel_descriptors = AvbInfo(args, files['kernel'])
     resign_kernel_tasks = [resign_kernel('kernel', 'initrd_normal.img', 'initrd_debuggable.img')]
     original_kernels = {"kernel" : original_kernel_descriptors}
+
+    # DiamaneOS: sign the decode service VM's kernel again over its unchanged initramfs. It is left out of
+    # original_kernels on purpose: the service VM holds no digests of it, and its initramfs digests do not change,
+    # which update_initrd_digests_in_service_vm would reject.
+    if 'decoder_vm_kernel' in files:
+        resign_kernel_tasks.append(resign_kernel('decoder_vm_kernel', 'decoder_vm_initrd', 'decoder_vm_initrd'))
 
     for ver in gki_versions:
         if f'gki-{ver}_kernel' in files:

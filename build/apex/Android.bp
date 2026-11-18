@@ -139,6 +139,9 @@ apex_defaults {
         "microdroid_initrd_normal",
         "microdroid.json",
         "microdroid_kernel",
+        // DiamaneOS: the decode service VM's guest kernel and initramfs (guest/decoder_vm).
+        "decoder_vm_initrd_apex",
+        "decoder_vm_kernel",
         "com.android.virt.init.rc",
         "preinstalled-packages-apex-com.android.virt.xml",
     ] + select(soong_config_variable("ANDROID", "avf_microdroid_guest_gki_version"), {
