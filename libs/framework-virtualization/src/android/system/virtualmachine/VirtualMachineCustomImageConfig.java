@@ -52,6 +52,7 @@ public class VirtualMachineCustomImageConfig {
     private static final String KEY_AUTO_MEMORY_BALLOON = "auto_memory_balloon";
     private static final String KEY_USB_CONFIG = "usb_config";
     private static final String KEY_SMBIOS = "smbios";
+    private static final String KEY_CPU_COUNT = "cpu_count";
 
     @Nullable private final String name;
     @Nullable private final String osName;
@@ -74,6 +75,8 @@ public class VirtualMachineCustomImageConfig {
     private final boolean trackpad;
     private final boolean autoMemoryBalloon;
     @Nullable private final UsbConfig usbConfig;
+    // DiamaneOS: an explicit number of vCPUs for a raw VM, 0 for the VirtualMachineConfig's CPU topology.
+    private int cpuCount;
 
     @Nullable
     public Disk[] getDisks() {
@@ -146,6 +149,15 @@ public class VirtualMachineCustomImageConfig {
 
     public boolean useNetwork() {
         return network;
+    }
+
+    /**
+     * DiamaneOS: the number of vCPUs this raw VM asks for, or 0 for the config's CPU topology.
+     *
+     * @hide
+     */
+    public int getCpuCount() {
+        return cpuCount;
     }
 
     /** @hide */
@@ -255,6 +267,7 @@ public class VirtualMachineCustomImageConfig {
         PersistableBundle smbiosOptionsPb =
                 customImageConfigBundle.getPersistableBundle(KEY_SMBIOS);
         builder.setSmbiosOptions(SmbiosOptions.from(smbiosOptionsPb));
+        builder.setCpuCount(customImageConfigBundle.getInt(KEY_CPU_COUNT, 0));
         return builder.build();
     }
 
@@ -327,6 +340,7 @@ public class VirtualMachineCustomImageConfig {
                 Optional.ofNullable(smbiosOptions)
                         .map(so -> so.toPersistableBundle())
                         .orElse(null));
+        pb.putInt(KEY_CPU_COUNT, cpuCount);
         return pb;
     }
 
@@ -615,6 +629,7 @@ public class VirtualMachineCustomImageConfig {
         private boolean autoMemoryBalloon = false;
         private UsbConfig usbConfig;
         private SmbiosOptions smbiosOptions;
+        private int cpuCount;
 
         /** @hide */
         public Builder() {}
@@ -745,9 +760,23 @@ public class VirtualMachineCustomImageConfig {
             return this;
         }
 
+        /**
+         * DiamaneOS: an explicit number of vCPUs, from 1 up to the host's CPU count (the VM manager checks the upper
+         * bound), or 0 for the VirtualMachineConfig's CPU topology.
+         *
+         * @hide
+         */
+        public Builder setCpuCount(int cpuCount) {
+            if (cpuCount < 0) {
+                throw new IllegalArgumentException("cpuCount must not be negative: " + cpuCount);
+            }
+            this.cpuCount = cpuCount;
+            return this;
+        }
+
         /** @hide */
         public VirtualMachineCustomImageConfig build() {
-            return new VirtualMachineCustomImageConfig(
+            VirtualMachineCustomImageConfig config = new VirtualMachineCustomImageConfig(
                     this.name,
                     this.osName,
                     this.kernelPath,
@@ -769,6 +798,8 @@ public class VirtualMachineCustomImageConfig {
                     autoMemoryBalloon,
                     usbConfig,
                     smbiosOptions);
+            config.cpuCount = cpuCount;
+            return config;
         }
     }
 
