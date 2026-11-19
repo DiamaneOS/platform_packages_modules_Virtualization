@@ -13,8 +13,10 @@
 // limitations under the License.
 
 // DiamaneOS guest kernel: kernel_common-6.18 with microdroid_defconfig plus seccomp, FAT, exFAT and MBR and GPT
-// partitions, without modules (kernel/guest.config). It boots the DiamaneOS VMs, each signed together with its own
-// initramfs the way Microdroid's kernel is.
+// partitions, without modules, and without what neither the filesystem VM nor the decode service VM uses
+// (Microdroid's storage, crash kernels, tracing, perf and debugfs), every hardening option kept
+// (kernel/guest.config, the full config). It boots the DiamaneOS VMs, each signed together with its own initramfs
+// the way Microdroid's kernel is.
 
 package {
     default_applicable_licenses: ["Android-Apache-2.0"],
