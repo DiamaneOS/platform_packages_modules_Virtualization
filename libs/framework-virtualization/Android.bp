@@ -81,3 +81,10 @@ java_library {
         "com.android.virt",
     ],
 }
+
+// DiamaneOS: the raw VM config's source for its host test (tests/customimageconfig).
+filegroup {
+    name: "framework-virtualization-custom-image-config-src",
+    srcs: ["src/android/system/virtualmachine/VirtualMachineCustomImageConfig.java"],
+    visibility: ["//packages/modules/Virtualization/libs/framework-virtualization/tests/customimageconfig"],
+}
