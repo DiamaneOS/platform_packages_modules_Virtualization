@@ -126,6 +126,25 @@ rust_test {
     test_suites: ["general-tests"],
 }
 
+// DiamaneOS: what the filesystem VM's hosts may ask for (src/fsvm_client.rs).
+rust_test_host {
+    name: "virtmgr_fsvm_client_test",
+    crate_name: "virtmgr_fsvm_client_test",
+    srcs: ["src/fsvm_client.rs"],
+    edition: "2021",
+    test_suites: ["general-tests"],
+}
+
+// DiamaneOS: the reader of a guest's console and log output, its bounds and its rate
+// (src/guest_log.rs).
+rust_test_host {
+    name: "virtmgr_guest_log_test",
+    crate_name: "virtmgr_guest_log_test",
+    srcs: ["src/guest_log.rs"],
+    edition: "2021",
+    test_suites: ["general-tests"],
+}
+
 // DiamaneOS: the VM manager's seccomp filter, what it decides, evaluated as the kernel would
 // (src/seccomp.rs).
 rust_test_host {
@@ -138,5 +157,14 @@ rust_test_host {
         "liblibc",
         "liblog_rust",
     ],
+    test_suites: ["general-tests"],
+}
+
+// DiamaneOS: the real private-instance helpers with an AIDL shape that cannot be cloned.
+rust_test_host {
+    name: "virtmgr_fsvm_instance_test",
+    crate_name: "virtmgr_fsvm_instance_test",
+    srcs: ["tests/fsvm_instance_host_test.rs"],
+    edition: "2021",
     test_suites: ["general-tests"],
 }

@@ -152,6 +152,9 @@ pub struct RunContext<'a> {
     pub console_in: Option<&'a ParcelFileDescriptor>,
     pub log_out: Option<&'a ParcelFileDescriptor>,
     pub devicetree_dump_out: Option<&'a ParcelFileDescriptor>,
+    /// DiamaneOS: the filesystem VM host that asks for this VM, if any, named once from its domain
+    /// (fsvm_client.rs).
+    pub diamaneos_fsvm: Option<crate::fsvm_client::FsvmCaller>,
 }
 
 /// Parses RunContext into raw arguments which will be used to construct a crosvm command. The
@@ -166,6 +169,8 @@ pub struct CrosvmCommand {
     // requirement of Vec.
     cleaners: Option<HashMap<String, Box<Cleaner>>>,
     balloon_enabled: bool,
+    // DiamaneOS: the lines this VM's console and log may still put in the log (guest_log.rs).
+    guest_log_rate: Arc<crate::guest_log::Rate>,
 }
 
 type Cleaner = dyn FnOnce(&CleanerContext) -> Result<()> + Send;
@@ -184,6 +189,7 @@ impl CrosvmCommand {
             preserved_fds: Vec::new(),
             cleaners: Some(HashMap::new()),
             balloon_enabled: false,
+            guest_log_rate: Arc::new(crate::guest_log::Rate::new(Instant::now())),
         };
         command
             .arg("--extended-status")
@@ -584,13 +590,15 @@ impl CrosvmCommand {
     fn add_console_arg(&mut self, context: &RunContext) -> Result<()> {
         // If user has provided an FD for console_out, let them read from it. Otherwise, we read
         // the console output from the VM and emit it over to logcat.
-        let (out_fd, read_file) = match context.console_out {
-            Some(pfd) => (Some(pfd.as_ref().try_clone()?), None),
-            None => {
+        // DiamaneOS: both streams use the tested output selection and argument formatter.
+        let (out_fd, read_file) = crate::guest_log::output(
+            context.console_out.map(|pfd| pfd.as_ref().try_clone()).transpose()?,
+            system_properties::read_bool("ro.debuggable", false),
+            || -> Result<(OwnedFd, File)> {
                 let (read_fd, write_fd) = create_pipe()?;
-                (Some(write_fd.into()), Some(read_fd))
-            }
-        };
+                Ok((write_fd.into(), read_fd))
+            },
+        )?;
 
         let in_fd = context.console_in.map(|pfd| pfd.as_ref().try_clone()).transpose()?;
 
@@ -608,9 +616,9 @@ impl CrosvmCommand {
             self.args(["--params", "console=hvc0"]);
         }
 
-        let out_args = out_fd.map_or("type=sink".to_string(), |fd| {
-            format!("type=file,path={}", self.add_preserved_fd(fd))
-        });
+        let out_args = crate::guest_log::output_arg(
+            out_fd.map(|fd| self.add_preserved_fd(fd).to_string()),
+        );
 
         let in_args =
             in_fd.map_or("".to_string(), |fd| format!(",input={}", self.add_preserved_fd(fd)));
@@ -627,7 +635,9 @@ impl CrosvmCommand {
             if in_device == CONSOLE_HVC0 { &in_args } else { "" }
         ));
 
-        let thread = read_file.map(|f| Self::logger_thread(f, format!("Console({})", context.cid)));
+        let rate = self.guest_log_rate.clone();
+        let thread =
+            read_file.map(|f| Self::logger_thread(f, format!("Console({})", context.cid), rate));
         let cleaner = move |_: &CleanerContext| {
             thread.map(JoinHandle::join);
             Ok(())
@@ -637,17 +647,19 @@ impl CrosvmCommand {
     }
 
     fn add_log_arg(&mut self, context: &RunContext) -> Result<()> {
-        let (out_fd, read_file) = match context.log_out {
-            Some(pfd) => (Some(pfd.as_ref().try_clone()?), None),
-            None => {
+        // DiamaneOS: both streams use the tested output selection and argument formatter.
+        let (out_fd, read_file) = crate::guest_log::output(
+            context.log_out.map(|pfd| pfd.as_ref().try_clone()).transpose()?,
+            system_properties::read_bool("ro.debuggable", false),
+            || -> Result<(OwnedFd, File)> {
                 let (read_fd, write_fd) = create_pipe()?;
-                (Some(write_fd.into()), Some(read_fd))
-            }
-        };
+                Ok((write_fd.into(), read_fd))
+            },
+        )?;
 
-        let out_args = out_fd.map_or("type=sink".to_string(), |fd| {
-            format!("type=file,path={}", self.add_preserved_fd(fd))
-        });
+        let out_args = crate::guest_log::output_arg(
+            out_fd.map(|fd| self.add_preserved_fd(fd).to_string()),
+        );
 
         // dev/hvc2
         self.arg(format!(
@@ -655,7 +667,8 @@ impl CrosvmCommand {
                     max-queue-sizes=[{CONSOLE_RX_QUEUE_SIZE},{CONSOLE_TX_QUEUE_SIZE}]"
         ));
 
-        let thread = read_file.map(|f| Self::logger_thread(f, format!("Log({})", context.cid)));
+        let rate = self.guest_log_rate.clone();
+        let thread = read_file.map(|f| Self::logger_thread(f, format!("Log({})", context.cid), rate));
         let cleaner = move |_: &CleanerContext| {
             thread.map(JoinHandle::join);
             Ok(())
@@ -664,36 +677,21 @@ impl CrosvmCommand {
         Ok(())
     }
 
-    fn logger_thread(read_from: File, tag: String) -> JoinHandle<()> {
+    fn logger_thread(
+        read_from: File,
+        tag: String,
+        rate: Arc<crate::guest_log::Rate>,
+    ) -> JoinHandle<()> {
         std::thread::Builder::new()
             .name("logger".to_string())
             .spawn(move || {
-                use std::io::BufRead;
-                let mut reader = std::io::BufReader::new(read_from);
-                let mut buf = vec![];
-                loop {
-                    buf.clear();
-                    buf.shrink_to(1024);
-                    match reader.read_until(b'\n', &mut buf) {
-                        Ok(0) => {
-                            info!("{}: EOF", &tag);
-                            return;
-                        }
-                        Ok(_size) => {
-                            if buf.last() == Some(&b'\n') {
-                                buf.pop();
-                                // Logs sent via TTY usually end lines with "\r\n".
-                                if buf.last() == Some(&b'\r') {
-                                    buf.pop();
-                                }
-                            }
-                            info!("{}: {}", &tag, &String::from_utf8_lossy(&buf));
-                        }
-                        Err(e) => {
-                            error!("Could not read console pipe: {e:?}");
-                            return;
-                        }
-                    };
+                // DiamaneOS: a fixed buffer, each line cut at a bound and the VM's lines rate-limited
+                // (guest_log.rs).
+                match crate::guest_log::pump(read_from, &rate, Instant::now, |line| {
+                    info!("{}: {}", &tag, line)
+                }) {
+                    Ok(()) => info!("{}: EOF", &tag),
+                    Err(e) => error!("Could not read console pipe: {e:?}"),
                 }
             })
             .expect("Failed to create logger thread")
@@ -810,8 +808,16 @@ impl CrosvmCommand {
                 let header = temp_dir.join(format!("composite-{index}-header.img"));
                 let footer = temp_dir.join(format!("composite-{index}-footer.img"));
 
+                // DiamaneOS: the filesystem instance FD is manager-created before any image probe.
+                let private_partitions;
+                let partitions = if context.diamaneos_fsvm.is_some() {
+                    private_partitions = crate::fsvm_instance::partitions(&disk.partitions, temp_dir)?;
+                    &private_partitions
+                } else {
+                    &disk.partitions
+                };
                 let (image, partition_files) = composite::make_composite_image(
-                    &disk.partitions,
+                    partitions,
                     &zero_filler,
                     &composite,
                     &header,
@@ -839,7 +845,7 @@ impl CrosvmCommand {
             // first bytes come from whoever made the card or the image and must never make crosvm parse them as
             // qcow2, composite or sparse. Every disk of a filesystem VM is raw, whatever its label (an OBB on a card
             // is labelled fuse), and so is a file whose label cannot be read.
-            let fsvm = filesystem_vm_caller();
+            let fsvm = context.diamaneos_fsvm.is_some();
             let label = disk
                 .image
                 .as_ref()
@@ -859,24 +865,14 @@ impl CrosvmCommand {
                 block_arg.push_str(",raw=true");
                 // DiamaneOS: keep a disk's 4096-byte logical blocks, so that the VM reads its table as written.
                 // Only a block device is asked: an OBB image is a file, and the ioctl on it would only fail, after
-                // an SELinux denial (the VM manager holds BLKSSZGET on vold's block devices only).
-                let blk = disk.image.as_ref().filter(|f| {
-                    use std::os::fd::AsRawFd as _;
-                    // SAFETY: every field of stat is valid as zero.
-                    let mut st: libc::stat = unsafe { std::mem::zeroed() };
-                    let fd: &std::os::fd::OwnedFd = (*f).as_ref();
-                    // SAFETY: fstat writes the stat struct, the descriptor stays open meanwhile.
-                    let r = unsafe { libc::fstat(fd.as_raw_fd(), &mut st) };
-                    r == 0 && (st.st_mode & libc::S_IFMT) == libc::S_IFBLK
-                });
-                if let Some(f) = blk {
-                    use std::os::fd::AsRawFd as _;
-                    const BLKSSZGET: libc::c_ulong = 0x1268;
-                    let mut size: libc::c_int = 0;
-                    // SAFETY: BLKSSZGET writes one int through the pointer. The descriptor stays open meanwhile.
-                    let r = unsafe { libc::ioctl(f.as_ref().as_raw_fd(), BLKSSZGET as _, &mut size) };
-                    if r == 0 && size == 4096 {
-                        block_arg.push_str(",block_size=4096");
+                // an SELinux denial (the VM manager holds BLKSSZGET on vold's block devices only). A block device
+                // whose block size cannot be read or given to the guest as it is gets no VM (fsvm_client.rs).
+                if let Some(image) = disk.image.as_ref() {
+                    let fd: &OwnedFd = image.as_ref();
+                    let size = crate::fsvm_client::block_size(is_block_device(fd), || logical_block_size(fd))
+                        .map_err(|e| anyhow!("disk {index}: {e}"))?;
+                    if let Some(size) = size {
+                        block_arg.push_str(&format!(",block_size={size}"));
                     }
                 }
             }
@@ -2851,13 +2847,26 @@ mod tests {
     }
 }
 
-/// DiamaneOS: whether this VM manager serves fsvmd or fsvmd_obb (vendor/diamaneos fsvm), the filesystem VM's host
-/// side. Each client starts its own VM manager, whose previous context is the client's.
-fn filesystem_vm_caller() -> bool {
-    crate::selinux::getprevcon()
-        .ok()
-        .and_then(|c| c.selinux_type().ok().map(|t| t == "fsvmd" || t == "fsvmd_obb"))
-        .unwrap_or(false)
+/// DiamaneOS: whether a descriptor is a block device.
+fn is_block_device(fd: &OwnedFd) -> std::result::Result<bool, String> {
+    // SAFETY: every field of stat is valid as zero.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: fstat writes the stat struct, the descriptor stays open meanwhile.
+    if unsafe { libc::fstat(fd.as_raw_fd(), &mut st) } != 0 {
+        return Err(io::Error::last_os_error().to_string());
+    }
+    Ok((st.st_mode & libc::S_IFMT) == libc::S_IFBLK)
+}
+
+/// DiamaneOS: a block device's logical block size (BLKSSZGET).
+fn logical_block_size(fd: &OwnedFd) -> std::result::Result<i32, String> {
+    const BLKSSZGET: libc::c_ulong = 0x1268;
+    let mut size: libc::c_int = 0;
+    // SAFETY: BLKSSZGET writes one int through the pointer. The descriptor stays open meanwhile.
+    if unsafe { libc::ioctl(fd.as_raw_fd(), BLKSSZGET as _, &mut size) } != 0 {
+        return Err(io::Error::last_os_error().to_string());
+    }
+    Ok(size)
 }
 
 /// DiamaneOS: whether a disk with this label (None: unreadable) must be opened raw, never parsed as an image format.

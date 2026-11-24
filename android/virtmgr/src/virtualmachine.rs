@@ -32,6 +32,8 @@ use crate::selinux::{
     check_host_service_permission, check_tee_service_permission, getfilecon, getprevcon, SeContext,
 };
 use crate::{get_calling_pid, get_calling_uid};
+// DiamaneOS: the filesystem VM's hosts (fsvm_client.rs).
+use crate::fsvm_client::{self, FsvmCaller};
 use android_system_virtualizationcommon::aidl::android::system::virtualizationcommon::ICEStoreKEK::ICEStoreKEK;
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use apkverify::{HashAlgorithm, V4Signature};
@@ -657,6 +659,13 @@ impl VirtualizationService {
 
         let caller_secontext = getprevcon().or_service_specific_exception(-1)?;
         info!("callers secontext: {caller_secontext}");
+        // DiamaneOS: the filesystem VM's hosts, named once from their domain (fsvm_client.rs).
+        let fsvm = FsvmCaller::from_domain(caller_secontext.selinux_type().or_service_specific_exception(-1)?);
+
+        // DiamaneOS: reject the original app variant before config conversion or payload access.
+        fsvm_client::check_variant(fsvm, matches!(config, aidl::VirtualMachineConfig::AppConfig(_)))
+            .map_err(|e| anyhow!(e))
+            .or_service_specific_exception(-1)?;
 
         // Allocating VM context checks the MANAGE_VIRTUAL_MACHINE permission.
         let (cid, temporary_directory) = if cfg!(early) {
@@ -700,6 +709,21 @@ impl VirtualizationService {
         };
         let config = config.as_ref();
         *is_protected = config.protectedVm;
+
+        // DiamaneOS: a filesystem VM host's request has one shape only (fsvm_client.rs).
+        if let Some(caller) = fsvm {
+            let disks: Vec<_> = config
+                .disks
+                .iter()
+                .map(|d| fsvm_client::DiskShape {
+                    whole_image: d.image.is_some() && d.partitions.is_empty(),
+                    partitions: d.partitions.iter().map(|p| p.label.as_str()).collect(),
+                })
+                .collect();
+            fsvm_client::check_request(caller, is_app_config, config.protectedVm, &disks)
+                .map_err(|e| anyhow!(e))
+                .or_service_specific_exception(-1)?;
+        }
 
         if !config.teeServices.is_empty() {
             if !config.protectedVm {
@@ -759,7 +783,9 @@ impl VirtualizationService {
                 .disks
                 .iter()
                 .filter_map(|disk| disk.image.as_ref().map(|image| (image, disk.writable)))
-                .try_for_each(|(image, writable)| check_label_for_disk(image, writable, calling_partition))
+                .try_for_each(|(image, writable)| {
+                    check_label_for_disk(image, writable, calling_partition, fsvm)
+                })
                 .or_service_specific_exception(-1)?;
             config
                 .disks
@@ -802,6 +828,7 @@ impl VirtualizationService {
             console_in: console_in_fd,
             log_out: log_fd,
             devicetree_dump_out: dump_dt_fd,
+            diamaneos_fsvm: fsvm,
         };
         let command = CrosvmCommand::build_from(&context).or_service_specific_exception(-1)?;
 
@@ -1456,27 +1483,6 @@ fn check_label_is_allowed(context: &SeContext, calling_partition: CallingPartiti
     }
 }
 
-/// DiamaneOS: which filesystem VM host calls, if any: fsvmd serves SD cards and USB drives, fsvmd_obb an app's OBB
-/// image. Each has its own binary and SELinux domain.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum FsvmCaller {
-    Card,
-    Obb,
-}
-
-fn fsvm_caller() -> Option<FsvmCaller> {
-    let path = CALLING_EXE_PATH.as_deref()?;
-    for prefix in ["/system_ext/bin/", "/system/system_ext/bin/"] {
-        if path == Path::new(&format!("{prefix}fsvmd")) {
-            return Some(FsvmCaller::Card);
-        }
-        if path == Path::new(&format!("{prefix}fsvmd_obb")) {
-            return Some(FsvmCaller::Obb);
-        }
-    }
-    None
-}
-
 fn check_label_for_partition(
     partition: &aidl::Partition,
     calling_partition: CallingPartition,
@@ -1507,46 +1513,13 @@ fn check_label_for_disk(
     file: &impl AsRawFd,
     writable: bool,
     calling_partition: CallingPartition,
+    fsvm: Option<FsvmCaller>,
 ) -> Result<()> {
     let context = getfilecon(file)?;
-    if let Some(caller) = fsvm_caller() {
-        return fsvm_disk_label(caller, context.selinux_type()?, writable);
+    if let Some(caller) = fsvm {
+        return fsvm_client::disk_label(caller, context.selinux_type()?, writable).map_err(|e| anyhow!(e));
     }
     check_label_is_allowed(&context, calling_partition).with_context(|| "disk image file invalid")
-}
-
-/// DiamaneOS: the disks each filesystem VM host may pass, and nothing else.
-fn fsvm_disk_label(caller: FsvmCaller, label: &str, writable: bool) -> Result<()> {
-    match (caller, label) {
-        (FsvmCaller::Card, "vold_device") => Ok(()),
-        (FsvmCaller::Obb, "media_rw_data_file" | "fuse") if !writable => Ok(()),
-        (FsvmCaller::Obb, "media_rw_data_file" | "fuse") => bail!("fsvmd_obb passed a writable OBB image ({label})"),
-        _ => bail!("{caller:?} filesystem VM may not use a disk labelled {label}"),
-    }
-}
-
-#[cfg(test)]
-mod diamaneos_label_tests {
-    use super::{fsvm_disk_label, FsvmCaller};
-
-    #[test]
-    fn filesystem_vm_disk_labels() {
-        use FsvmCaller::*;
-        // Cards: their block device, read and written. Nothing else.
-        assert!(fsvm_disk_label(Card, "vold_device", true).is_ok());
-        assert!(fsvm_disk_label(Card, "vold_device", false).is_ok());
-        for other in ["media_rw_data_file", "fuse", "app_data_file", "system_file", "shell_data_file", "x"] {
-            assert!(fsvm_disk_label(Card, other, false).is_err(), "card {other}");
-        }
-        // OBB images: from shared storage or a card, only read. Never a card itself.
-        for obb in ["media_rw_data_file", "fuse"] {
-            assert!(fsvm_disk_label(Obb, obb, false).is_ok(), "{obb}");
-            assert!(fsvm_disk_label(Obb, obb, true).is_err(), "{obb} writable");
-        }
-        for other in ["vold_device", "app_data_file", "system_file", "virtualizationservice_data_file", "x"] {
-            assert!(fsvm_disk_label(Obb, other, false).is_err(), "obb {other}");
-        }
-    }
 }
 
 fn check_label_for_file(
