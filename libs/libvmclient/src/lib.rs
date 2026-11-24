@@ -15,6 +15,7 @@
 //! Client library for VirtualizationService.
 
 mod death_reason;
+mod diamaneos_stdio; // DiamaneOS: the VM manager's standard streams (our own file).
 mod error_code;
 mod errors;
 mod sync;
@@ -123,9 +124,17 @@ pub struct VirtualizationService {
     /// Client FD for UDS connection to virtmgr's RpcBinder server. Closing it
     /// will make virtmgr shut down.
     client_fd: OwnedFd,
+    /// DiamaneOS: virtmgr's pid, which also names its process group. fsvmd's seccomp filter lets
+    /// only that group be killed, and /proc may hide virtmgr from its parent (a file capability).
+    pid: u32,
 }
 
 impl VirtualizationService {
+    /// DiamaneOS: the pid of the virtmgr this spawned, the leader of its process group.
+    pub fn pid(&self) -> u32 {
+        self.pid
+    }
+
     /// Spawns a new instance of virtmgr, a child process that will host
     /// the VirtualizationService AIDL service.
     /// Prefer not calling this method multiple times to prevent spawning virtmgr
@@ -150,6 +159,8 @@ impl VirtualizationService {
         command.arg("--rpc-server-fd").arg(format!("{}", server_fd.as_raw_fd()));
         command.arg("--ready-fd").arg(format!("{}", ready_fd.as_raw_fd()));
         command.preserved_fds(vec![server_fd, ready_fd]);
+        // DiamaneOS: no zygote /dev/null for the VM manager (diamaneos_stdio.rs).
+        diamaneos_stdio::own_null_stdio(&mut command);
 
         // Determine the name of this process in many ways. Try arg[0], COMM, and PID in that
         // order.
@@ -167,6 +178,7 @@ impl VirtualizationService {
         command.arg0(format!("virtmgr_{prog_name}"));
 
         let process = SharedChild::spawn(&mut command)?;
+        let pid = process.id(); // DiamaneOS: see VirtualizationService::pid
         let is_tty = isatty(std::io::stdout().as_raw_fd())?;
         let cur_group_id = if is_tty { Some(tcgetpgrp(std::io::stdout())?) } else { None };
         let new_group_id = Pid::from_raw(process.id().try_into().unwrap());
@@ -196,7 +208,7 @@ impl VirtualizationService {
         // MANAGE_VIRTUAL_MACHINE permission. Therefore, such errors are propagated instead of
         // being ignored.
         let _ = File::from(wait_fd).read(&mut [0])?;
-        Ok(VirtualizationService { client_fd })
+        Ok(VirtualizationService { client_fd, pid })
     }
 
     /// Connects to the VirtualizationService AIDL service.

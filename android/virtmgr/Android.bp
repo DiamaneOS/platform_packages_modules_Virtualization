@@ -125,3 +125,18 @@ rust_test {
     ],
     test_suites: ["general-tests"],
 }
+
+// DiamaneOS: the VM manager's seccomp filter, what it decides, evaluated as the kernel would
+// (src/seccomp.rs).
+rust_test_host {
+    name: "virtmgr_seccomp_test",
+    crate_name: "virtmgr_seccomp_test",
+    srcs: ["src/seccomp.rs"],
+    edition: "2021",
+    rustlibs: [
+        "libanyhow",
+        "liblibc",
+        "liblog_rust",
+    ],
+    test_suites: ["general-tests"],
+}
