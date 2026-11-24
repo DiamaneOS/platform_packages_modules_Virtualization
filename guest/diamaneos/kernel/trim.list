@@ -1,0 +1,116 @@
+# trim.list: options taken out of the guest kernel (build-guest-kernel.sh). Neither the decode service VM nor the
+# filesystem VM uses them: both boot a static /init from a plain cpio initramfs, have no modules, no swap, no
+# cgroups, no network but vsock, no storage but the card (FAT or exFAT on virtio-blk), and no debugging userspace.
+# An option Kconfig keeps whatever this list says carries its reason after the name ("forced: ..."):
+# check-guest-config.py fails on a listed option still set without one.
+# Microdroid's storage stack: its payload on ext4, EROFS and FUSE, dm-verity, dm-crypt, file encryption.
+EXT4_FS
+EROFS_FS
+FUSE_FS
+FS_ENCRYPTION
+BLK_INLINE_ENCRYPTION
+BLK_INLINE_ENCRYPTION_FALLBACK
+MD
+BLK_DEV_DM
+BLK_DEV_LOOP
+ZRAM
+BLK_DEV_ZONED
+UNICODE
+# Block extras: the BFQ and Kyber schedulers, module autoload of block nodes, block debugfs.
+IOSCHED_BFQ
+MQ_IOSCHED_KYBER
+BLOCK_LEGACY_AUTOLOAD
+BLK_DEBUG_FS
+# Memory and process features neither VM calls.
+SWAP
+ZSMALLOC
+USERFAULTFD
+SECRETMEM
+CROSS_MEMORY_ATTACH
+CGROUPS
+MEMCG
+PSI
+AIO
+FHANDLE
+INOTIFY_USER
+BINFMT_SCRIPT
+# COREDUMP stays: fs/binfmt_elf.c sets min_coredump outside its ifdef and does not build without it.
+RD_LZ4
+# Crash kernels (Microdroid's ramdump).
+KEXEC
+KEXEC_FILE
+CRASH_DUMP
+PROC_VMCORE
+VMCORE_INFO
+CRASH_RESERVE
+# Keys and ciphers for file encryption, dm-crypt and signed modules or kexec images.
+KEYS
+SYSTEM_TRUSTED_KEYRING
+ASYMMETRIC_KEY_TYPE
+X509_CERTIFICATE_PARSER
+PKCS7_MESSAGE_PARSER
+CRYPTO_RSA
+CRYPTO_HCTR2
+CRYPTO_XCTR
+CRYPTO_XTS
+CRYPTO_ESSIV
+CRYPTO_AUTHENC
+CRYPTO_CTS
+CRYPTO_CBC
+CRYPTO_ECB
+CRYPTO_LZO
+CRYPTO_AES_ARM64_CE_BLK
+CRYPTO_AES_ARM64_CE
+CRYPTO_AES
+CRYPTO_SHA256
+# vsock extras: socket diagnostics and the in-guest loopback transport.
+VSOCKETS_DIAG
+VSOCKETS_LOOPBACK
+# Devices no VM host offers them: terminals and input, extra UARTs, a CryptoCell RNG, an EEPROM, power and
+# watchdog hardware, EDAC, RTC write back and its extra interfaces, dma-buf heaps, PCIe ports, SR-IOV and
+# endpoints, legacy virtio-pci, GICv5, hardware spinlocks, device coredumps.
+VT
+INPUT
+SERIO
+UNIX98_PTYS
+SERIAL_8250_EXAR
+SERIAL_8250_FSL forced: on arm64 it has no prompt and defaults to SERIAL_8250 (drivers/tty/serial/8250/Kconfig)
+HW_RANDOM_CCTRNG
+EEPROM_93CX6
+POWER_RESET_SYSCON
+POWER_SUPPLY forced: ARM64 selects it (arch/arm64/Kconfig)
+WATCHDOG
+EDAC
+RTC_SYSTOHC
+RTC_INTF_PROC
+RTC_INTF_DEV
+DMABUF_HEAPS
+DMABUF_HEAPS_SYSTEM
+PCIEPORTBUS
+PCI_IOV
+PCI_ENDPOINT
+VIRTIO_PCI_LEGACY
+ARM_GIC_V5 forced: ARM64 selects it (arch/arm64/Kconfig)
+HWSPINLOCK
+ALLOW_DEV_COREDUMP
+# Performance counters and tracing.
+ARM_PMU
+ARM_PMUV3
+ARM64_BRBE
+PERF_EVENTS
+PROFILING
+FTRACE
+TRACE_MMIO_ACCESS
+# Debugging aids (debug info goes too, see build-guest-kernel.sh).
+DEBUG_FS
+IKCONFIG
+IKCONFIG_PROC
+MAGIC_SYSRQ
+PAGE_OWNER
+SCHEDSTATS
+DETECT_HUNG_TASK
+SOFTLOCKUP_DETECTOR
+WQ_WATCHDOG
+RCU_TRACE
+PID_IN_CONTEXTIDR
+HEADERS_INSTALL

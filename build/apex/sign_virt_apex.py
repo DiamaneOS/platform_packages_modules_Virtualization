@@ -623,6 +623,13 @@ def TargetFiles(input_dir):
             ret[f'gki-{ver}_initrd_normal.img']     = initrd_normal
             ret[f'gki-{ver}_initrd_debuggable.img'] = initrd_debug
 
+    # DiamaneOS: the filesystem VM's kernel and its initramfs (guest/diamaneos). The initramfs carries no
+    # bootconfig, so its key must not end in initrd_normal.img or initrd_debuggable.img (IsInitrdImage).
+    fsvm_kernel = os.path.join(input_dir, 'etc/fs/fsvm_kernel')
+    if os.path.isfile(fsvm_kernel):
+        ret['fsvm_kernel'] = fsvm_kernel
+        ret['fsvm_initrd'] = os.path.join(input_dir, 'etc/fsvm_initrd.img')
+
     kernel_16k = os.path.join(input_dir, 'etc/fs/microdroid_kernel_16k')
     initrd_normal_16k = os.path.join(input_dir, 'etc/microdroid_16k_initrd_normal.img')
     initrd_debug_16k = os.path.join(input_dir, 'etc/microdroid_16k_initrd_debuggable.img')
@@ -734,6 +741,12 @@ def SignVirtApex(args):
                 f'gki-{ver}_initrd_debuggable.img')
             resign_kernel_tasks.append(task)
             original_kernels[kernel_name] = original_kernel_descriptors
+
+    # DiamaneOS: sign the filesystem VM's kernel again over its unchanged initramfs. It is left out of
+    # original_kernels on purpose: the service VM holds no digests of it, and its initramfs digests do not change,
+    # which update_initrd_digests_in_service_vm would reject.
+    if 'fsvm_kernel' in files:
+        resign_kernel_tasks.append(resign_kernel('fsvm_kernel', 'fsvm_initrd', 'fsvm_initrd'))
 
     # Re-sign service_vm if it exists; it only exists in arm64 environment.
     if os.path.exists(files['service_vm']):

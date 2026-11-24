@@ -758,8 +758,8 @@ impl VirtualizationService {
             config
                 .disks
                 .iter()
-                .flat_map(|disk| disk.image.as_ref())
-                .try_for_each(|image| check_label_for_file(image, "disk image", calling_partition))
+                .filter_map(|disk| disk.image.as_ref().map(|image| (image, disk.writable)))
+                .try_for_each(|(image, writable)| check_label_for_disk(image, writable, calling_partition))
                 .or_service_specific_exception(-1)?;
             config
                 .disks
@@ -1456,6 +1456,27 @@ fn check_label_is_allowed(context: &SeContext, calling_partition: CallingPartiti
     }
 }
 
+/// DiamaneOS: which filesystem VM host calls, if any: fsvmd serves SD cards and USB drives, fsvmd_obb an app's OBB
+/// image. Each has its own binary and SELinux domain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FsvmCaller {
+    Card,
+    Obb,
+}
+
+fn fsvm_caller() -> Option<FsvmCaller> {
+    let path = CALLING_EXE_PATH.as_deref()?;
+    for prefix in ["/system_ext/bin/", "/system/system_ext/bin/"] {
+        if path == Path::new(&format!("{prefix}fsvmd")) {
+            return Some(FsvmCaller::Card);
+        }
+        if path == Path::new(&format!("{prefix}fsvmd_obb")) {
+            return Some(FsvmCaller::Obb);
+        }
+    }
+    None
+}
+
 fn check_label_for_partition(
     partition: &aidl::Partition,
     calling_partition: CallingPartition,
@@ -1478,6 +1499,56 @@ fn check_label_for_kernel_files(
     }
     Ok(())
 }
+/// DiamaneOS: disks the filesystem VM's hosts may pass besides the usual labels. The filesystem VM's kernel parses
+/// them so that Android's does not, and they hold no code the VM runs: fsvmd the block device of an SD card or USB
+/// drive (`vold_device`), fsvmd_obb an app's OBB image, read-only, from shared storage (`media_rw_data_file`) or from
+/// a card, opened below the card's FUSE mount (`fuse`). crosvm opens all of them raw (crosvm.rs).
+fn check_label_for_disk(
+    file: &impl AsRawFd,
+    writable: bool,
+    calling_partition: CallingPartition,
+) -> Result<()> {
+    let context = getfilecon(file)?;
+    if let Some(caller) = fsvm_caller() {
+        return fsvm_disk_label(caller, context.selinux_type()?, writable);
+    }
+    check_label_is_allowed(&context, calling_partition).with_context(|| "disk image file invalid")
+}
+
+/// DiamaneOS: the disks each filesystem VM host may pass, and nothing else.
+fn fsvm_disk_label(caller: FsvmCaller, label: &str, writable: bool) -> Result<()> {
+    match (caller, label) {
+        (FsvmCaller::Card, "vold_device") => Ok(()),
+        (FsvmCaller::Obb, "media_rw_data_file" | "fuse") if !writable => Ok(()),
+        (FsvmCaller::Obb, "media_rw_data_file" | "fuse") => bail!("fsvmd_obb passed a writable OBB image ({label})"),
+        _ => bail!("{caller:?} filesystem VM may not use a disk labelled {label}"),
+    }
+}
+
+#[cfg(test)]
+mod diamaneos_label_tests {
+    use super::{fsvm_disk_label, FsvmCaller};
+
+    #[test]
+    fn filesystem_vm_disk_labels() {
+        use FsvmCaller::*;
+        // Cards: their block device, read and written. Nothing else.
+        assert!(fsvm_disk_label(Card, "vold_device", true).is_ok());
+        assert!(fsvm_disk_label(Card, "vold_device", false).is_ok());
+        for other in ["media_rw_data_file", "fuse", "app_data_file", "system_file", "shell_data_file", "x"] {
+            assert!(fsvm_disk_label(Card, other, false).is_err(), "card {other}");
+        }
+        // OBB images: from shared storage or a card, only read. Never a card itself.
+        for obb in ["media_rw_data_file", "fuse"] {
+            assert!(fsvm_disk_label(Obb, obb, false).is_ok(), "{obb}");
+            assert!(fsvm_disk_label(Obb, obb, true).is_err(), "{obb} writable");
+        }
+        for other in ["vold_device", "app_data_file", "system_file", "virtualizationservice_data_file", "x"] {
+            assert!(fsvm_disk_label(Obb, other, false).is_err(), "obb {other}");
+        }
+    }
+}
+
 fn check_label_for_file(
     file: &impl AsRawFd,
     name: &str,

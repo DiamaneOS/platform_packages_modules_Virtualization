@@ -135,6 +135,9 @@ apex_defaults {
         "vm",
     ],
     prebuilts: [
+        // DiamaneOS: the filesystem VM's guest kernel and initramfs (guest/diamaneos).
+        "fsvm_initrd",
+        "fsvm_kernel",
         "microdroid_initrd_debuggable",
         "microdroid_initrd_normal",
         "microdroid.json",

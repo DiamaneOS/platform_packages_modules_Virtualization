@@ -827,8 +827,41 @@ impl CrosvmCommand {
                 bail!("DiskImage {:?} didn't contain image or partitions.", disk);
             };
 
+            // DiamaneOS: a vold block device (an SD card or USB drive) and an app's OBB image are always raw. Their
+            // first bytes come from whoever made the card or the image and must never make crosvm parse them as
+            // qcow2, composite or sparse. Every disk of a filesystem VM is raw, whatever its label (an OBB on a card
+            // is labelled fuse), and so is a file whose label cannot be read.
+            let fsvm = filesystem_vm_caller();
+            let label = disk
+                .image
+                .as_ref()
+                .map(|f| crate::selinux::getfilecon(f).ok().and_then(|c| c.selinux_type().ok().map(String::from)));
+            let raw_only = match &label {
+                Some(l) => raw_only_for(l.as_deref(), fsvm),
+                None => false,
+            };
             let path = self.add_preserved_fd(image);
             let mut block_arg = format!("path={},ro={},lock=false", path, !disk.writable);
+            // DiamaneOS: a filesystem VM's writable card goes past Android's page cache (O_DIRECT), so what the VM
+            // writes, and every flush it sends (fdatasync), is on the card and not in a cache a pulled card loses.
+            if fsvm && disk.writable && matches!(&label, Some(Some(l)) if l == "vold_device") {
+                block_arg.push_str(",direct=true");
+            }
+            if raw_only {
+                block_arg.push_str(",raw=true");
+                // DiamaneOS: keep a disk's 4096-byte logical blocks, so that the VM reads its table as written.
+                if let Some(f) = &disk.image {
+                    use std::os::fd::AsRawFd as _;
+                    const BLKSSZGET: libc::c_ulong = 0x1268;
+                    let mut size: libc::c_int = 0;
+                    // SAFETY: BLKSSZGET writes one int through the pointer. The descriptor stays open meanwhile, and
+                    // a descriptor that is not a block device only makes the call fail.
+                    let r = unsafe { libc::ioctl(f.as_ref().as_raw_fd(), BLKSSZGET as _, &mut size) };
+                    if r == 0 && size == 4096 {
+                        block_arg.push_str(",block_size=4096");
+                    }
+                }
+            }
             if let Some(id) = &disk.id {
                 block_arg.push_str(&format!(",id={}", id));
             }
@@ -2717,5 +2750,42 @@ mod tests {
         assert_eq!(handler.find(&id1), None);
         assert_eq!(handler.find(&id2), None);
         assert_eq!(handler.find(&id3), None);
+    }
+}
+
+/// DiamaneOS: whether this VM manager serves fsvmd or fsvmd_obb (vendor/diamaneos fsvm), the filesystem VM's host
+/// side. Each client starts its own VM manager, whose previous context is the client's.
+fn filesystem_vm_caller() -> bool {
+    crate::selinux::getprevcon()
+        .ok()
+        .and_then(|c| c.selinux_type().ok().map(|t| t == "fsvmd" || t == "fsvmd_obb"))
+        .unwrap_or(false)
+}
+
+/// DiamaneOS: whether a disk with this label (None: unreadable) must be opened raw, never parsed as an image format.
+fn raw_only_for(label: Option<&str>, filesystem_vm: bool) -> bool {
+    filesystem_vm
+        || match label {
+            Some(t) => t == "vold_device" || t == "media_rw_data_file" || t == "fuse",
+            None => true,
+        }
+}
+
+#[cfg(test)]
+mod diamaneos_raw_tests {
+    use super::raw_only_for;
+
+    #[test]
+    fn disks_from_cards_and_apps_are_raw() {
+        for l in ["vold_device", "media_rw_data_file", "fuse"] {
+            assert!(raw_only_for(Some(l), false), "{l}");
+        }
+        assert!(raw_only_for(None, false));
+        assert!(!raw_only_for(Some("virtualizationservice_data_file"), false));
+        // A filesystem VM's disks are raw whatever the label.
+        for l in ["vold_device", "media_rw_data_file", "fuse", "virtualizationservice_data_file", "app_data_file"] {
+            assert!(raw_only_for(Some(l), true), "{l}");
+        }
+        assert!(raw_only_for(None, true));
     }
 }
