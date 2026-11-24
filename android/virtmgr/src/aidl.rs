@@ -47,6 +47,8 @@ pub use android_system_virtualizationservice::aidl::android::system::virtualizat
     VirtualMachinePayloadConfig::VirtualMachinePayloadConfig,
     VirtualMachineRawConfig::VirtualMachineRawConfig,
     VirtualMachineState::VirtualMachineState,
+    // DiamaneOS typed instance lifecycle receipt.
+    VirtualMachineLifecycleOutcome::VirtualMachineLifecycleOutcome,
 };
 pub use android_system_virtualmachineservice::aidl::android::system::virtualmachineservice::{
     IVirtualMachineService::{BnVirtualMachineService, IVirtualMachineService},

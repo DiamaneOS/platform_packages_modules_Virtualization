@@ -783,7 +783,8 @@ public final class VirtualMachineConfig {
         pb.start();
     }
 
-    VirtualMachineRawConfig toVsRawConfig() throws IllegalStateException, IOException {
+    // DiamaneOS the caller releases every partially constructed raw launch descriptor.
+    VirtualMachineRawConfig toVsRawConfig(VmRunFiles files) throws IllegalStateException, IOException {
         VirtualMachineRawConfig config = new VirtualMachineRawConfig();
         VirtualMachineCustomImageConfig customImageConfig = getCustomImageConfig();
         requireNonNull(customImageConfig);
@@ -795,7 +796,7 @@ public final class VirtualMachineConfig {
                         .map(
                                 (path) -> {
                                     try {
-                                        return ParcelFileDescriptor.open(
+                                        return files.open(
                                                 new File(path), MODE_READ_ONLY);
                                     } catch (FileNotFoundException e) {
                                         throw new RuntimeException(e);
@@ -805,18 +806,18 @@ public final class VirtualMachineConfig {
 
         config.initrd =
                 Optional.ofNullable(customImageConfig.getInitrdPath())
-                        .map((path) -> openOrNull(new File(path), MODE_READ_ONLY))
+                        .map((path) -> files.openOrNull(new File(path), MODE_READ_ONLY))
                         .orElse(null);
         config.bootloader =
                 Optional.ofNullable(customImageConfig.getBootloaderPath())
-                        .map((path) -> openOrNull(new File(path), MODE_READ_ONLY))
+                        .map((path) -> files.openOrNull(new File(path), MODE_READ_ONLY))
                         .orElse(null);
 
         String[] pflashPaths = customImageConfig.getPflashPaths();
         if (pflashPaths != null) {
             config.pflash = new ParcelFileDescriptor[pflashPaths.length];
             for (int i = 0; i < pflashPaths.length; i++) {
-                config.pflash[i] = openOrNull(new File(pflashPaths[i]), MODE_READ_WRITE);
+                config.pflash[i] = files.openOrNull(new File(pflashPaths[i]), MODE_READ_WRITE);
             }
         } else {
             config.pflash = new ParcelFileDescriptor[0];
@@ -824,9 +825,9 @@ public final class VirtualMachineConfig {
 
         if (config.kernel == null && config.bootloader == null) {
           if (Arrays.stream(Build.SUPPORTED_ABIS).anyMatch("x86_64"::equals)) {
-            config.bootloader = openOrNull(new File(U_BOOT_PREBUILT_PATH_X86), MODE_READ_ONLY);
+            config.bootloader = files.openOrNull(new File(U_BOOT_PREBUILT_PATH_X86), MODE_READ_ONLY);
           } else {
-            config.bootloader = openOrNull(new File(U_BOOT_PREBUILT_PATH_ARM), MODE_READ_ONLY);
+            config.bootloader = files.openOrNull(new File(U_BOOT_PREBUILT_PATH_ARM), MODE_READ_ONLY);
           }
         }
 
@@ -846,7 +847,7 @@ public final class VirtualMachineConfig {
             String diskImagePath = customImageConfig.getDisks()[i].getImagePath();
             if (diskImagePath != null) {
                 config.disks[i].image =
-                        ParcelFileDescriptor.open(
+                        files.open(
                                 new File(diskImagePath),
                                 config.disks[i].writable ? MODE_READ_WRITE : MODE_READ_ONLY);
             }
@@ -857,7 +858,7 @@ public final class VirtualMachineConfig {
                 Partition part = new Partition();
                 part.label = p.name;
                 part.image =
-                        ParcelFileDescriptor.open(
+                        files.open(
                                 new File(p.imagePath),
                                 p.writable ? MODE_READ_WRITE : MODE_READ_ONLY);
                 part.writable = p.writable;

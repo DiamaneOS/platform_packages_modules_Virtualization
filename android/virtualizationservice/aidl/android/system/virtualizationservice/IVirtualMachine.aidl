@@ -21,6 +21,7 @@ import android.system.virtualizationservice.IVirtualMachineCallback;
 import android.system.virtualizationservice.VirtualMachineDebugInfo;
 import android.system.virtualizationservice.VirtualMachineDisplay;
 import android.system.virtualizationservice.VirtualMachineState;
+import android.system.virtualizationservice.VirtualMachineLifecycleOutcome;
 
 interface IVirtualMachine {
     /**
@@ -124,4 +125,8 @@ interface IVirtualMachine {
      * Returns the list of currently active displays.
      */
     VirtualMachineDisplay[] getDisplays();
+    /** DiamaneOS privileged evidence for this exact instance, independent of DEAD and stop reasons. */
+    VirtualMachineLifecycleOutcome getLifecycleOutcome();
+    /** DiamaneOS reconcile this exact instance without relying on the coarse Java status. */
+    VirtualMachineLifecycleOutcome retireAndGetLifecycleOutcome();
 }

@@ -1662,6 +1662,25 @@ impl aidl::IVirtualMachine for VirtualMachine {
         Ok(self.instance.cid as i32)
     }
 
+    // DiamaneOS framework bookkeeping needs the existing VM management privilege.
+    fn getLifecycleOutcome(&self) -> binder::Result<aidl::VirtualMachineLifecycleOutcome> {
+        check_manage_access()?;
+        use crate::launch_evidence::Outcome;
+        use aidl::VirtualMachineLifecycleOutcome as Wire;
+        Ok(match self.instance.launch_evidence.outcome() {
+            Outcome::NeverLaunched => Wire::DEFINITELY_NEVER_LAUNCHED,
+            Outcome::ChildExitObserved => Wire::CHILD_EXIT_OBSERVED,
+            Outcome::Unknown => Wire::UNKNOWN,
+        })
+    }
+
+    // DiamaneOS cancellation consumes NotStarted under the native instance lock.
+    fn retireAndGetLifecycleOutcome(&self) -> binder::Result<aidl::VirtualMachineLifecycleOutcome> {
+        check_manage_access()?;
+        let _ = self.instance.kill();
+        self.getLifecycleOutcome()
+    }
+
     fn getState(&self) -> binder::Result<aidl::VirtualMachineState> {
         // Don't check permission. The owner of the VM might have passed this binder object to
         // others.
@@ -1689,36 +1708,40 @@ impl aidl::IVirtualMachine for VirtualMachine {
     }
 
     fn start(&self) -> binder::Result<()> {
-        if is_shutting_down()? {
+        // DiamaneOS one launch claim covers setup and seals state before publishing certainty.
+        crate::launch_cleanup::start(&self.instance, || {
+            if is_shutting_down()? {
+                self.instance
+                    .callbacks
+                    .callback_on_died(self.instance.cid, aidl::DeathReason::HOST_SHUTDOWN);
+                return Err(Status::new_service_specific_error_str(
+                    aidl::ERROR_UNEXPECTED,
+                    Some("Device is shutting down"),
+                ));
+            }
+            if self.instance.requires_vm_service {
+                let cid = self.instance.cid;
+                // Start VM service listening for connections from the new CID on port=CID.
+                let service = VirtualMachineService::new_binder(self.instance.clone()).as_binder();
+                let port = cid;
+                let (vm_server, _) = RpcServer::new_vsock(service, cid, port)
+                    .context(format!("Could not start RpcServer on port {port}"))
+                    .or_service_specific_exception(-1)?;
+                vm_server.start();
+                *self.instance.vm_service.lock().unwrap() = Some(vm_server);
+            }
             self.instance
-                .callbacks
-                .callback_on_died(self.instance.cid, aidl::DeathReason::HOST_SHUTDOWN);
-            return Err(Status::new_service_specific_error_str(
-                aidl::ERROR_UNEXPECTED,
-                Some("Device is shutting down"),
-            ));
-        }
-        if self.instance.requires_vm_service {
-            let cid = self.instance.cid;
-            // Start VM service listening for connections from the new CID on port=CID.
-            let service = VirtualMachineService::new_binder(self.instance.clone()).as_binder();
-            let port = cid;
-            let (vm_server, _) = RpcServer::new_vsock(service, cid, port)
-                .context(format!("Could not start RpcServer on port {port}"))
+                .start()
+                .with_context(|| format!("Error starting VM with CID {}", self.instance.cid))
+                .with_log()
                 .or_service_specific_exception(-1)?;
-            vm_server.start();
-            *self.instance.vm_service.lock().unwrap() = Some(vm_server);
-        }
-        self.instance
-            .start()
-            .with_context(|| format!("Error starting VM with CID {}", self.instance.cid))
-            .with_log()
-            .or_service_specific_exception(-1)?;
-        if !self.instance.vendor_tee_services.is_empty() {
-            self.handle_vendor_tee_services()
-        } else {
-            Ok(())
-        }
+            if !self.instance.vendor_tee_services.is_empty() {
+                self.handle_vendor_tee_services()
+            } else {
+                Ok(())
+            }
+        }).unwrap_or_else(|| Err(Status::new_service_specific_error_str(
+            aidl::ERROR_UNEXPECTED, Some("VM launch already consumed"))))
     }
 
     fn stop(&self) -> binder::Result<()> {

@@ -18,6 +18,10 @@ mod aidl;
 mod atom;
 mod composite;
 mod crosvm;
+// DiamaneOS child launch and exit receipts.
+mod launch_evidence;
+mod launch_cleanup;
+mod launch_debug;
 mod debug_config;
 mod dt_overlay;
 // DiamaneOS: the filesystem VM's hosts and what they may ask for (fsvm_client.rs).

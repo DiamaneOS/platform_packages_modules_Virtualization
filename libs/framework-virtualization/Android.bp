@@ -88,3 +88,15 @@ filegroup {
     srcs: ["src/android/system/virtualmachine/VirtualMachineCustomImageConfig.java"],
     visibility: ["//packages/modules/Virtualization/libs/framework-virtualization/tests/customimageconfig"],
 }
+
+// DiamaneOS lifecycle and resource helpers are tested as shipped source.
+filegroup {
+    name: "framework-virtualization-lifecycle-src",
+    srcs: [
+        "src/android/system/virtualmachine/VmLifecycle.java",
+        "src/android/system/virtualmachine/VmInputWorker.java",
+        "src/android/system/virtualmachine/VmRunFiles.java",
+        "src/android/system/virtualmachine/VmLaunchDebug.java",
+    ],
+    visibility: ["//packages/modules/Virtualization/libs/framework-virtualization/tests/lifecycle"],
+}
