@@ -21,8 +21,9 @@
 //! (`--file-backed-mapping ...,ram`), which its Gunyah backend binds with GH_VM_ANDROID_MAP_CMA_MEM.
 //!
 //! Who gets the pool is SELinux's decision, not a setting: only the VM managers of the decode service and of fsvmd
-//! may open the node (and the shell's on debuggable builds, for tests). For every other caller, on a device without
-//! a pool, or when the pool has no room, the VM gets ordinary memory as before, with the kernel's piece limit.
+//! (cards and OBB images) may open the node (and the shell's on debuggable builds, for tests). For every other
+//! caller, on a device without a pool, or when the pool has no room, the VM gets ordinary memory as before, with the
+//! kernel's piece limit.
 
 use log::{info, warn};
 use std::fs::{File, OpenOptions};
@@ -79,6 +80,18 @@ pub fn take(size: u64) -> Option<File> {
             }
             Taken::Never => return None,
         }
+    }
+}
+
+/// Pool memory of `size` bytes if the pool has room now, without waiting: for memory that may as well be ordinary.
+/// `what` names the region in the log.
+pub fn take_now(size: u64, what: &str) -> Option<File> {
+    match try_take(size) {
+        Taken::File(file) => {
+            info!("VM memory pool: {} MiB of the VM's {what} from the pool", size >> 20);
+            Some(file)
+        }
+        Taken::NoRoom | Taken::Never => None,
     }
 }
 

@@ -15,7 +15,7 @@
 //! Client library for VirtualizationService.
 
 mod death_reason;
-mod diamaneos_stdio; // DiamaneOS: the VM manager's standard streams (our own file).
+mod diamaneos_stdio; // DiamaneOS: the VM manager's standard streams (own file).
 mod error_code;
 mod errors;
 mod sync;

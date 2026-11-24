@@ -1149,6 +1149,7 @@ fn patch_psci(fdt: &mut Fdt, psci: &PsciInfo) -> libfdt::Result<()> {
     let compat = psci.version.get_compatible();
 
     if compat != node_compat {
+        // DiamaneOS: the NUL ends the string in the compatible property.
         node.setprop(c"compatible", compat.to_bytes_with_nul())?;
     }
 
