@@ -1,0 +1,88 @@
+// Copyright (C) 2026 DiamaneOS
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// DiamaneOS: the decode service's VM (packages/apps/DiamaneOSSanitizer, docs/virt-apex.md there): its guest kernel,
+// signed over its initramfs like Microdroid's, and the initramfs, both in the virt APEX. The kernel is the DiamaneOS
+// guest kernel the filesystem VM uses too (diamaneos_guest_kernel_prebuilt, guest/diamaneos on fs-in-vm), the
+// initramfs the decode service's own (decoder_vm_initrd).
+
+package {
+    default_applicable_licenses: ["Android-Apache-2.0"],
+}
+
+// No debuggable variant: the same initramfs stands for both descriptors pvmfw knows.
+avb_gen_vbmeta_image {
+    name: "decoder_vm_initrd_normal_hashdesc",
+    defaults: ["microdroid_initrd_normal_defaults"],
+    src: ":decoder_vm_initrd",
+}
+
+avb_gen_vbmeta_image {
+    name: "decoder_vm_initrd_debug_hashdesc",
+    defaults: ["microdroid_initrd_debug_defaults"],
+    src: ":decoder_vm_initrd",
+}
+
+avb_add_hash_footer {
+    name: "decoder_vm_kernel_signed",
+    defaults: ["microdroid_kernel_signed_defaults"],
+    filename: "decoder_vm_kernel",
+    arch: {
+        arm64: {
+            src: ":diamaneos_guest_kernel_prebuilt",
+        },
+    },
+    include_descriptors_from_images: [
+        ":decoder_vm_initrd_normal_hashdesc",
+        ":decoder_vm_initrd_debug_hashdesc",
+    ],
+}
+
+prebuilt_etc {
+    name: "decoder_vm_kernel",
+    src: ":empty_file",
+    relative_install_path: "fs",
+    filename: "decoder_vm_kernel",
+    arch: {
+        arm64: {
+            src: ":decoder_vm_kernel_signed",
+        },
+    },
+}
+
+prebuilt_etc {
+    name: "decoder_vm_initrd_apex",
+    src: ":decoder_vm_initrd_api_checked",
+    filename: "decoder_vm_initrd.img",
+}
+
+// The decode service reaches the hidden raw VM API by reflection. This twin makes the same calls directly
+// (apitwin/, keep it in step with the service's GuestVm.rawConfig), never installed.
+java_library {
+    name: "decoder_vm_api_twin",
+    srcs: ["apitwin/src/**/*.java"],
+    libs: ["framework-virtualization.impl"],
+    platform_apis: true,
+    installable: false,
+}
+
+// The initramfs as it goes into the APEX, unchanged, once the twin compiled: an upstream change to the hidden API
+// fails the APEX build instead of showing only at run time.
+genrule {
+    name: "decoder_vm_initrd_api_checked",
+    srcs: [":decoder_vm_initrd"],
+    device_common_srcs: [":decoder_vm_api_twin"],
+    out: ["decoder_vm_initrd.img"],
+    cmd: "cp $(location :decoder_vm_initrd) $(out)",
+}

@@ -142,6 +142,9 @@ apex_defaults {
         "microdroid_initrd_normal",
         "microdroid.json",
         "microdroid_kernel",
+        // DiamaneOS: the decode service VM's guest kernel and initramfs (guest/decoder_vm).
+        "decoder_vm_initrd_apex",
+        "decoder_vm_kernel",
         "com.android.virt.init.rc",
         "preinstalled-packages-apex-com.android.virt.xml",
     ] + select(soong_config_variable("ANDROID", "avf_microdroid_guest_gki_version"), {
@@ -274,6 +277,8 @@ python_binary_host {
     name: "sign_virt_apex",
     srcs: [
         "sign_virt_apex.py",
+        "guest_vm_contract.py",
+        ":guest_vm_role_digests",
     ],
     required: [
         // sign_virt_apex should be runnable from outside the source tree,
@@ -320,6 +325,12 @@ sh_test_host {
     ],
     data: [
         ":test.com.android.virt.pem",
+        // DiamaneOS: the protected VM guests' signing steps (sign_virt_apex_guest_test.py).
+        ":test2.com.android.virt.pem",
+        "sign_virt_apex.py",
+        "sign_virt_apex_guest_test.py",
+        "sign_virt_apex_optimized_test.py",
+        "guest_vm_contract.py",
     ],
     device_common_data: [
         ":com.android.virt",
@@ -395,4 +406,21 @@ systemserverclasspath_fragment {
         true: true,
         default: false,
     }),
+}
+
+// DiamaneOS: digests reach the trusted signing tool from the role's own build producer,
+// independently of the APEX directory handed to release signing.
+python_binary_host {
+    name: "guest_vm_contract_tool",
+    main: "guest_vm_contract.py",
+    srcs: ["guest_vm_contract.py"],
+}
+
+genrule {
+    name: "guest_vm_role_digests",
+    tools: ["guest_vm_contract_tool"],
+    srcs: [":decoder_vm_initrd", ":fsvm_guest_initrd"],
+    out: ["guest_vm_role_digests.py"],
+    cmd: "$(location guest_vm_contract_tool) --decoder-vm $(location :decoder_vm_initrd) " +
+        "--fsvm $(location :fsvm_guest_initrd) --out $(out)",
 }
