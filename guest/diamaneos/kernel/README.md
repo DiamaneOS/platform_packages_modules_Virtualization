@@ -10,7 +10,7 @@ The Image is built from source with the recipe in this folder, and anyone can bu
 ## Source and toolchain
 
 - Kernel: https://github.com/DiamaneOS/kernel_common-6.18, commit
-  `040efa0b976713b296af67235d38df55dd4b32b6` (release 6.18.63). The guest kernel must have the phone kernel's
+  `bbcb23232a847add89943a86e077d7a29dfac779` (release 6.18.63). The guest kernel must have the phone kernel's
   release. The image checks refuse a build where they differ.
 - Compiler: the Android tree's clang prebuilt `clang-r596125` (`prebuilts/clang/host/linux-x86/clang-r596125`).
 - Build tools: the Android tree's `prebuilts/build-tools` (bison, flex, m4 and bc).
@@ -30,8 +30,11 @@ The Image is built from source with the recipe in this folder, and anyone can bu
    build.
 4. `Image` with fixed build stamps: the commit's date as the build time, and the user, host and build number the
    published Image carries. The date is given in ISO form, because the kernel also stamps the files of its built-in
-   initramfs with it through `date -d`, which does not read Git's default date form. With that, two builds from
-   different folders at different times give the same bytes.
+   initramfs with it through `date -d`, which does not read Git's default date form. The release takes its suffix,
+   `-g` and the commit's first 12 hex digits, from a `localversion` file in the build folder instead of Git, as the
+   phone kernel's build does. RANDSTRUCT takes its structure layout seed from that file, so every build of the
+   commit lays out structures the same way. With that, two builds from different folders at different times give
+   the same bytes.
 
 `guest.config` is the configuration the recipe makes.
 
@@ -39,7 +42,7 @@ The Image is built from source with the recipe in this folder, and anyone can bu
 
 ```bash
 git init kernel
-git -C kernel fetch --depth 1 https://github.com/DiamaneOS/kernel_common-6.18 040efa0b976713b296af67235d38df55dd4b32b6
+git -C kernel fetch --depth 1 https://github.com/DiamaneOS/kernel_common-6.18 bbcb23232a847add89943a86e077d7a29dfac779
 git -C kernel checkout FETCH_HEAD
 ./build-guest-kernel.sh --kernel kernel --aosp /path/to/android-tree --out out
 sha256sum out/Image arm64/Image
@@ -53,4 +56,4 @@ published ones. `--new` builds a candidate Image from a changed recipe or commit
 
 The published Image is byte for byte what this recipe builds from the commit above with `clang-r596125`.
 
-SHA-256 of `arm64/Image`: `3c46473ad1be58bcff30d3b50f52de6796669a7859db00ad45746cd5c92bbef4`
+SHA-256 of `arm64/Image`: `d78c51046308f7780c1108c426ba5e8f1849b0d567dc8ec1d9b96098e913b9e0`

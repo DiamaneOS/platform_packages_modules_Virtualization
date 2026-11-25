@@ -34,7 +34,7 @@
 set -euo pipefail
 
 # The kernel_common commit of the published arm64/Image (README.md).
-PIN=040efa0b976713b296af67235d38df55dd4b32b6
+PIN=bbcb23232a847add89943a86e077d7a29dfac779
 
 usage() { sed -n '17,32p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
 KERNEL= AOSP= CLANG= TOOLS= OUT= JOBS= NEW=0
@@ -82,7 +82,9 @@ export KBUILD_BUILD_TIMESTAMP="$(git -C "$KERNEL" log -1 --format=%cd --date=iso
 date -d "$KBUILD_BUILD_TIMESTAMP" > /dev/null || { echo "date -d does not read $KBUILD_BUILD_TIMESTAMP" >&2; exit 1; }
 export KBUILD_BUILD_USER=diamaneos-build KBUILD_BUILD_HOST=diamaneos-builder KBUILD_BUILD_VERSION=1
 CFG="/bin/bash $KERNEL/scripts/config"
-MK="make -C $KERNEL ARCH=arm64 LLVM=1 LLVM_IAS=1 -j$JOBS"
+# The release takes its commit from the localversion file written below, as the phone kernel's build does:
+# setlocalversion finds no repository and adds no version of its own.
+MK="env GIT_DIR=$OUT/no-repository make -C $KERNEL ARCH=arm64 LLVM=1 LLVM_IAS=1 -j$JOBS"
 
 # 1. The base: microdroid_defconfig with filesystem support and the guest's extra hardening, without modules.
 rm -rf "$OUT/base" "$OUT/build"
@@ -114,7 +116,9 @@ else
   differs "guest.config: differs from the published one (diff $OUT/guest.config $HERE/guest.config)"
 fi
 
-# 3. Image.
+# 3. Image. The localversion file holds -g and the commit's first 12 hex digits, the release suffix Git gave before.
+# RANDSTRUCT takes its layout seed from it. Without it the kernel picks a random seed and every build differs.
+printf -- '-g%s' "${commit:0:12}" > "$OUT/build/localversion"
 $MK O="$OUT/build" Image >> "$OUT/build.log" 2>&1
 cp "$OUT/build/arch/arm64/boot/Image" "$OUT/Image"
 echo "Image: $(sha256sum "$OUT/Image" | cut -d' ' -f1)"
