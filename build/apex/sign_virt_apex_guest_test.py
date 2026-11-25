@@ -134,6 +134,14 @@ class GuestVmSigningTest(unittest.TestCase):
 
     # Which files are signed.
 
+    def test_contract_is_the_copy_diamaneos_tools_vendors(self):
+        # diamaneos-tools vendors guest_vm_contract.py byte for byte and its test_guest_contract pins the same
+        # digest: a change to one copy fails here or there until both copies are the same bytes again.
+        path = os.path.join(os.path.dirname(os.path.abspath(sva.__file__)), 'guest_vm_contract.py')
+        with open(path, 'rb') as f:
+            self.assertEqual(hashlib.sha256(f.read()).hexdigest(),
+                             '0e743079ebf8c8b43efb8cb4b7c5d293425a07f5f3f67f31a88d249a46969367')
+
     def test_missing_kernel_is_an_error(self):
         for role in ROLES:
             for other in ROLES:

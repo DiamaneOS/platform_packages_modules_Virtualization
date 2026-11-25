@@ -3,7 +3,9 @@
 `guest_vm_contract.py` is the shared definition for archive structure, role metadata,
 full-length SHA-256 descriptors and AVB signatures. diamaneos-tools vendors this file
 byte for byte as `src/diamaneos_tools/guest_vm_contract.py`. Change both copies together
-and compare their bytes before landing. The tools tests pin the shared file's digest.
+and compare their bytes before landing. The tools test (test_guest_contract) and
+sign_virt_apex_guest_test.py pin the same digest of the shared file, so a change to one copy
+alone fails a test.
 
 The release signer carries `guest_vm_role_digests.py` inside its Python executable.
 Soong generates it directly from `decoder_vm_initrd` and `fsvm_guest_initrd`, independently
@@ -12,7 +14,8 @@ that embedded identity. Use the signing executable from the trusted build's otat
 The APEX carries no input-controlled role manifest and no new release key is involved.
 
 Standalone source verification and diamaneos-tools use the reviewed digests in the
-contract module. They identify the initramfs outputs in set 20261120-userdebug-950170b55f.
+contract module. They identify the initramfs outputs of the 2026-11-24 squash sources, built
+twice with the same bytes (user set 20261125-user-c37ab2cfdd and a separate build).
 These are independent of the pair's AVB descriptors and the packaged APEX. The image gate
 also retains the independent guest kernel body pin.
 
