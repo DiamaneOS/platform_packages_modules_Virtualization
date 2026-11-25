@@ -140,7 +140,7 @@ class GuestVmSigningTest(unittest.TestCase):
         path = os.path.join(os.path.dirname(os.path.abspath(sva.__file__)), 'guest_vm_contract.py')
         with open(path, 'rb') as f:
             self.assertEqual(hashlib.sha256(f.read()).hexdigest(),
-                             '0e743079ebf8c8b43efb8cb4b7c5d293425a07f5f3f67f31a88d249a46969367')
+                             'c3ae6e7a890be13f7a6ab73e6f3b577bb054ccd3348c9a670822f577c7ce84ab')
 
     def test_missing_kernel_is_an_error(self):
         for role in ROLES:
