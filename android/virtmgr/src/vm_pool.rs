@@ -22,8 +22,9 @@
 //!
 //! Who gets the pool is SELinux's decision, not a setting: only the VM managers of the decode service and of fsvmd
 //! (cards and OBB images) may open the node (and the shell's on debuggable builds, for tests). For every other
-//! caller, on a device without a pool, or when the pool has no room, the VM gets ordinary memory as before, with the
-//! kernel's piece limit.
+//! caller and on a device without a pool, the VM gets ordinary memory as before, with the kernel's piece limit. When
+//! the pool has no room, a caller of the pool asks the same node for ordinary memory in large blocks
+//! (GUNYAH_VM_POOL_MEM_ORDINARY), so its VM still comes in few pieces.
 
 use log::{info, warn};
 use std::fs::{File, OpenOptions};
@@ -43,6 +44,9 @@ struct PoolMemArgs {
 
 /// GH_ANDROID_CREATE_POOL_MEM_FD: _IOW('A', 0x30, struct gunyah_vm_pool_mem_args).
 const GH_ANDROID_CREATE_POOL_MEM_FD: u32 = 0x4010_4130;
+
+/// GUNYAH_VM_POOL_MEM_ORDINARY: ordinary memory in the largest blocks the kernel has, not the pool.
+const POOL_MEM_ORDINARY: u64 = 1;
 
 /// How long a start waits for room that a VM still ending holds: its crosvm gives the blocks back when it exits, after
 /// the hypervisor returned them and the kernel zeroed them. A restarted decode service asked about 0.15 s before its old
@@ -72,11 +76,11 @@ pub fn take(size: u64) -> Option<File> {
             }
             Taken::NoRoom => {
                 info!(
-                    "VM memory pool has no room for {} MiB, the VM gets ordinary memory (waited {:?})",
+                    "VM memory pool has no room for {} MiB, the VM gets ordinary memory in large blocks (waited {:?})",
                     size >> 20,
                     started.elapsed()
                 );
-                return None;
+                return ordinary(size, "RAM");
             }
             Taken::Never => return None,
         }
@@ -91,7 +95,23 @@ pub fn take_now(size: u64, what: &str) -> Option<File> {
             info!("VM memory pool: {} MiB of the VM's {what} from the pool", size >> 20);
             Some(file)
         }
-        Taken::NoRoom | Taken::Never => None,
+        Taken::NoRoom => ordinary(size, what),
+        Taken::Never => None,
+    }
+}
+
+/// Ordinary memory of `size` bytes in large blocks from the pool node, for a caller of the pool the pool has no room
+/// for, or None (the VM then gets ordinary memory as before).
+fn ordinary(size: u64, what: &str) -> Option<File> {
+    match ask(size, POOL_MEM_ORDINARY) {
+        Ok(file) => {
+            info!("VM memory pool: {} MiB of the VM's {what} from ordinary memory in large blocks", size >> 20);
+            Some(file)
+        }
+        Err(e) => {
+            warn!("VM memory pool: no ordinary memory in large blocks for the VM's {what}: {e}");
+            None
+        }
     }
 }
 
@@ -122,10 +142,7 @@ fn try_take(size: u64) -> Taken {
             return Taken::Never;
         }
     };
-    let args = PoolMemArgs { size, flags: 0 };
-    // SAFETY: the ioctl reads one struct gunyah_vm_pool_mem_args through the pointer, which stays valid for the
-    // call, and returns a new descriptor or -1. The device descriptor stays open meanwhile.
-    let fd = unsafe { libc::ioctl(device.as_raw_fd(), GH_ANDROID_CREATE_POOL_MEM_FD as _, &args) };
+    let fd = create(&device, size, 0);
     if fd < 0 {
         let e = io::Error::last_os_error();
         if e.raw_os_error() == Some(libc::ENOMEM) {
@@ -139,4 +156,23 @@ fn try_take(size: u64) -> Taken {
     }
     // SAFETY: the kernel returned a new descriptor that nothing else owns.
     Taken::File(unsafe { File::from_raw_fd(fd) })
+}
+
+/// One GH_ANDROID_CREATE_POOL_MEM_FD on `device`: the new descriptor, or -1 with errno set.
+fn create(device: &File, size: u64, flags: u64) -> i32 {
+    let args = PoolMemArgs { size, flags };
+    // SAFETY: the ioctl reads one struct gunyah_vm_pool_mem_args through the pointer, which stays valid for the
+    // call, and returns a new descriptor or -1. The device descriptor stays open meanwhile.
+    unsafe { libc::ioctl(device.as_raw_fd(), GH_ANDROID_CREATE_POOL_MEM_FD as _, &args) }
+}
+
+/// A file of `size` bytes with `flags`, on an open of its own.
+fn ask(size: u64, flags: u64) -> io::Result<File> {
+    let device = OpenOptions::new().read(true).custom_flags(libc::O_CLOEXEC).open(POOL_DEVICE)?;
+    let fd = create(&device, size, flags);
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the kernel returned a new descriptor that nothing else owns.
+    Ok(unsafe { File::from_raw_fd(fd) })
 }
