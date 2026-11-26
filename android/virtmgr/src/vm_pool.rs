@@ -53,10 +53,11 @@ const POOL_MEM_ORDINARY: u64 = 1;
 /// VM was gone, and without the wait its new VM stayed on ordinary memory for good.
 const ROOM_WAIT: Duration = Duration::from_secs(5);
 
-/// A file that holds `size` bytes of pool memory for one protected VM, or None when the VM gets ordinary memory.
-/// Never fails the VM: any error here means ordinary memory. A full pool is asked again, with growing pauses, for up to
-/// ROOM_WAIT before that.
-pub fn take(size: u64) -> Option<File> {
+/// A file that holds `size` bytes of pool memory for one protected VM, or None when the VM gets ordinary memory. A
+/// full pool is asked again, with growing pauses, for up to ROOM_WAIT before that. An error only when ordinary memory
+/// in large blocks cannot be had (no room in the piece budget of all VMs, or no memory): the VM could not start on
+/// scattered memory either, so it fails now, not at the hypervisor's lend after its setup.
+pub fn take(size: u64) -> io::Result<Option<File>> {
     let started = Instant::now();
     let mut pause = Duration::from_millis(50);
     let mut waited = false;
@@ -67,7 +68,7 @@ pub fn take(size: u64) -> Option<File> {
                     info!("VM memory pool: room came back after {:?}", started.elapsed());
                 }
                 info!("VM memory pool: {} MiB of the VM's RAM from the pool", size >> 20);
-                return Some(file);
+                return Ok(Some(file));
             }
             Taken::NoRoom if started.elapsed() + pause <= ROOM_WAIT => {
                 std::thread::sleep(pause);
@@ -82,35 +83,40 @@ pub fn take(size: u64) -> Option<File> {
                 );
                 return ordinary(size, "RAM");
             }
-            Taken::Never => return None,
+            Taken::Never => return Ok(None),
         }
     }
 }
 
 /// Pool memory of `size` bytes if the pool has room now, without waiting: for memory that may as well be ordinary.
-/// `what` names the region in the log.
-pub fn take_now(size: u64, what: &str) -> Option<File> {
+/// `what` names the region in the log. Errors as `take`.
+pub fn take_now(size: u64, what: &str) -> io::Result<Option<File>> {
     match try_take(size) {
         Taken::File(file) => {
             info!("VM memory pool: {} MiB of the VM's {what} from the pool", size >> 20);
-            Some(file)
+            Ok(Some(file))
         }
         Taken::NoRoom => ordinary(size, what),
-        Taken::Never => None,
+        Taken::Never => Ok(None),
     }
 }
 
 /// Ordinary memory of `size` bytes in large blocks from the pool node, for a caller of the pool the pool has no room
-/// for, or None (the VM then gets ordinary memory as before).
-fn ordinary(size: u64, what: &str) -> Option<File> {
+/// for. None when the kernel has no such files (the VM then gets ordinary memory as before). An error when the piece
+/// budget of all VMs has no room for it (ENOSPC) or the memory is not there (ENOMEM): the VM's start fails.
+fn ordinary(size: u64, what: &str) -> io::Result<Option<File>> {
     match ask(size, POOL_MEM_ORDINARY) {
         Ok(file) => {
             info!("VM memory pool: {} MiB of the VM's {what} from ordinary memory in large blocks", size >> 20);
-            Some(file)
+            Ok(Some(file))
+        }
+        Err(e) if matches!(e.raw_os_error(), Some(libc::ENOSPC) | Some(libc::ENOMEM)) => {
+            warn!("VM memory pool: no ordinary memory in large blocks for the VM's {what}: {e}, the VM does not start");
+            Err(e)
         }
         Err(e) => {
             warn!("VM memory pool: no ordinary memory in large blocks for the VM's {what}: {e}");
-            None
+            Ok(None)
         }
     }
 }

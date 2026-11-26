@@ -220,7 +220,7 @@ impl CrosvmCommand {
         command.add_network_arg(context)?;
         command.add_file_backed_mapping_arg(context)?;
         #[cfg(target_arch = "aarch64")]
-        command.add_vm_pool_arg(context);
+        command.add_vm_pool_arg(context)?;
         command.add_assigned_devices_arg(context)?;
         command.add_dump_dtb_arg(context)?;
         command.add_gdb_arg(context)?;
@@ -1085,11 +1085,11 @@ impl CrosvmCommand {
     /// DiamaneOS: a protected VM's RAM from the pool the kernel sets aside at boot, when this caller may use it and
     /// it has room (vm_pool.rs). Otherwise the RAM stays ordinary memory.
     #[cfg(target_arch = "aarch64")]
-    fn add_vm_pool_arg(&mut self, context: &RunContext) {
+    fn add_vm_pool_arg(&mut self, context: &RunContext) -> Result<()> {
         let config = context.config;
         // A client that brings its own memory files keeps them.
         if !config.protectedVm || !config.customMemoryBackingFiles.is_empty() {
-            return;
+            return Ok(());
         }
         // crosvm's aarch64 RAM region starts at 0x8000_0000 and holds the VM's memory and the ramdump reserve. The
         // firmware region and the bounce buffers follow below.
@@ -1097,7 +1097,7 @@ impl CrosvmCommand {
         let memory_mib: u32 =
             config.memoryMib.try_into().ok().and_then(NonZeroU32::new).map_or(256, NonZeroU32::get);
         let ram = u64::from(memory_mib.saturating_add(Self::get_ramdump_mib(context))) << 20;
-        if let Some(file) = crate::vm_pool::take(ram) {
+        if let Some(file) = crate::vm_pool::take(ram).context("the VM's RAM")? {
             let path = self.add_preserved_fd(file);
             self.args([
                 "--file-backed-mapping",
@@ -1114,7 +1114,8 @@ impl CrosvmCommand {
             Ok(p) if p.as_deref() != Some("none")
         );
         if runs_pvmfw {
-            let fw = crate::vm_pool::take_now(AARCH64_PROTECTED_VM_FW_SIZE, "firmware region");
+            let fw = crate::vm_pool::take_now(AARCH64_PROTECTED_VM_FW_SIZE, "firmware region")
+                .context("the VM's firmware region")?;
             if let Some(file) = fw {
                 let path = self.add_preserved_fd(file);
                 self.args([
@@ -1132,7 +1133,9 @@ impl CrosvmCommand {
         // Never waited for.
         let swiotlb = u64::from(Self::get_swiotlb_mib(config)) << 20;
         if swiotlb > 0 {
-            if let Some(file) = crate::vm_pool::take_now(swiotlb, "bounce buffers") {
+            if let Some(file) =
+                crate::vm_pool::take_now(swiotlb, "bounce buffers").context("the VM's bounce buffers")?
+            {
                 let path = self.add_preserved_fd(file);
                 let addr = AARCH64_PHYS_MEM_START + ram;
                 self.args([
@@ -1141,6 +1144,7 @@ impl CrosvmCommand {
                 ]);
             }
         }
+        Ok(())
     }
 
     fn add_assigned_devices_arg(&mut self, context: &RunContext) -> Result<()> {
