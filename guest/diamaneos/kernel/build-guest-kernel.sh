@@ -104,6 +104,8 @@ $MK O="$OUT/build" olddefconfig >> "$OUT/build.log" 2>&1
 # The built-in command line without the parameters whose code is gone, else the kernel hands them to /init.
 # sysctl.vm.compaction_proactiveness=0: kcompactd sleeps until compaction is asked for, so an idle VM keeps no
 # half-second timer of its own (it would wake a sleeping phone through its vCPU).
+# One timer stays on purpose: the CRNG reseed (drivers/char/random.c, every 60 s). It keeps the guest's random
+# numbers forward secret, which a deferred reseed would weaken, so a running VM wakes the phone about once a minute.
 cmdline="stack_depot_disable=on kasan.stacktrace=off cgroup_disable=pressure ioremap_guard panic=-1 bootconfig arm64.nompam sysctl.vm.compaction_proactiveness=0"
 grep -q '^CONFIG_CGROUPS=y' "$OUT/build/.config" || cmdline=$(echo "$cmdline" | sed 's/ cgroup_disable=pressure//')
 grep -q '^CONFIG_STACKDEPOT=y' "$OUT/build/.config" || cmdline=$(echo "$cmdline" | sed 's/stack_depot_disable=on //')
