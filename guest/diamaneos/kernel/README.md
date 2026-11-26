@@ -10,7 +10,7 @@ The Image is built from source with the recipe in this folder, and anyone can bu
 ## Source and toolchain
 
 - Kernel: https://github.com/DiamaneOS/kernel_common-6.18, commit
-  `a09a116b7eb5e3504c963ea177f4632e720d1a8b` (release 6.18.64). The guest kernel must have the phone kernel's
+  `2142ff40ddc5a986704586db8b565ae5c14a3933` (release 6.18.64). The guest kernel must have the phone kernel's
   release. The image checks refuse a build where they differ.
 - Compiler: the Android tree's clang prebuilt `clang-r596125` (`prebuilts/clang/host/linux-x86/clang-r596125`).
 - Build tools: the Android tree's `prebuilts/build-tools` (bison, flex, m4 and bc).
@@ -44,7 +44,7 @@ The Image is built from source with the recipe in this folder, and anyone can bu
 
 ```bash
 git init kernel
-git -C kernel fetch --depth 1 https://github.com/DiamaneOS/kernel_common-6.18 a09a116b7eb5e3504c963ea177f4632e720d1a8b
+git -C kernel fetch --depth 1 https://github.com/DiamaneOS/kernel_common-6.18 2142ff40ddc5a986704586db8b565ae5c14a3933
 git -C kernel checkout FETCH_HEAD
 ./build-guest-kernel.sh --kernel kernel --aosp /path/to/android-tree --out out
 sha256sum out/Image arm64/Image
@@ -58,4 +58,4 @@ published ones. `--new` builds a candidate Image from a changed recipe or commit
 
 The published Image is byte for byte what this recipe builds from the commit above with `clang-r596125`.
 
-SHA-256 of `arm64/Image`: `479ee25ee0b3b0988d982d37c3398390eb336f45ac53a49287091fad197c0c6c`
+SHA-256 of `arm64/Image`: `8677cc32983b91453a63e8f68c4208a93947dfe774231ab6000e2fd2da868403`

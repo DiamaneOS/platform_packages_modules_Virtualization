@@ -34,7 +34,7 @@
 set -euo pipefail
 
 # The kernel_common commit of the published arm64/Image (README.md).
-PIN=a09a116b7eb5e3504c963ea177f4632e720d1a8b
+PIN=2142ff40ddc5a986704586db8b565ae5c14a3933
 
 usage() { sed -n '17,32p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
 KERNEL= AOSP= CLANG= TOOLS= OUT= JOBS= NEW=0
