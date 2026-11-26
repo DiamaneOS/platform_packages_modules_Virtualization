@@ -34,7 +34,7 @@
 set -euo pipefail
 
 # The kernel_common commit of the published arm64/Image (README.md).
-PIN=b1030b93288376525de1b11f391b833cbe41a4b3
+PIN=a09a116b7eb5e3504c963ea177f4632e720d1a8b
 
 usage() { sed -n '17,32p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
 KERNEL= AOSP= CLANG= TOOLS= OUT= JOBS= NEW=0
@@ -102,7 +102,9 @@ dis=$(grep -v '^#' "$HERE/trim.list" | awk '{print $1}' | grep . | sed 's/^/-d /
 $CFG --file "$OUT/build/.config" $dis -d DEBUG_INFO_DWARF5 -e DEBUG_INFO_NONE
 $MK O="$OUT/build" olddefconfig >> "$OUT/build.log" 2>&1
 # The built-in command line without the parameters whose code is gone, else the kernel hands them to /init.
-cmdline="stack_depot_disable=on kasan.stacktrace=off cgroup_disable=pressure ioremap_guard panic=-1 bootconfig arm64.nompam"
+# sysctl.vm.compaction_proactiveness=0: kcompactd sleeps until compaction is asked for, so an idle VM keeps no
+# half-second timer of its own (it would wake a sleeping phone through its vCPU).
+cmdline="stack_depot_disable=on kasan.stacktrace=off cgroup_disable=pressure ioremap_guard panic=-1 bootconfig arm64.nompam sysctl.vm.compaction_proactiveness=0"
 grep -q '^CONFIG_CGROUPS=y' "$OUT/build/.config" || cmdline=$(echo "$cmdline" | sed 's/ cgroup_disable=pressure//')
 grep -q '^CONFIG_STACKDEPOT=y' "$OUT/build/.config" || cmdline=$(echo "$cmdline" | sed 's/stack_depot_disable=on //')
 $CFG --file "$OUT/build/.config" --set-str CMDLINE "$cmdline"

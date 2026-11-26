@@ -10,7 +10,7 @@ The Image is built from source with the recipe in this folder, and anyone can bu
 ## Source and toolchain
 
 - Kernel: https://github.com/DiamaneOS/kernel_common-6.18, commit
-  `b1030b93288376525de1b11f391b833cbe41a4b3` (release 6.18.64). The guest kernel must have the phone kernel's
+  `a09a116b7eb5e3504c963ea177f4632e720d1a8b` (release 6.18.64). The guest kernel must have the phone kernel's
   release. The image checks refuse a build where they differ.
 - Compiler: the Android tree's clang prebuilt `clang-r596125` (`prebuilts/clang/host/linux-x86/clang-r596125`).
 - Build tools: the Android tree's `prebuilts/build-tools` (bison, flex, m4 and bc).
@@ -22,7 +22,9 @@ The Image is built from source with the recipe in this folder, and anyone can bu
    modules (`base.config`). The guest adds `ZERO_CALL_USED_REGS` and `SECURITY_DMESG_RESTRICT`, both set to `y`
    in this layer. `SCHED_STACK_END_CHECK` stays off and `VMAP_STACK` stays on.
 2. The options in `trim.list` taken out: everything neither VM uses, from Microdroid's storage stack to tracing and
-   debugfs. Debug info goes too. The built-in command line loses the parameters whose code is gone.
+   debugfs. Debug info goes too. The built-in command line loses the parameters whose code is gone, and sets
+   `vm.compaction_proactiveness` to 0: kcompactd then sleeps until compaction is asked for, so an idle VM keeps
+   no timer of its own.
 3. `check-guest-config.py` compares the result with the base: only the two named boolean hardening options may
    change from disabled to enabled, no hardening option may become weaker, every option the VMs
    need must be set, and every option of `trim.list` must be gone. Three stay because Kconfig keeps them on arm64
@@ -42,7 +44,7 @@ The Image is built from source with the recipe in this folder, and anyone can bu
 
 ```bash
 git init kernel
-git -C kernel fetch --depth 1 https://github.com/DiamaneOS/kernel_common-6.18 b1030b93288376525de1b11f391b833cbe41a4b3
+git -C kernel fetch --depth 1 https://github.com/DiamaneOS/kernel_common-6.18 a09a116b7eb5e3504c963ea177f4632e720d1a8b
 git -C kernel checkout FETCH_HEAD
 ./build-guest-kernel.sh --kernel kernel --aosp /path/to/android-tree --out out
 sha256sum out/Image arm64/Image
@@ -56,4 +58,4 @@ published ones. `--new` builds a candidate Image from a changed recipe or commit
 
 The published Image is byte for byte what this recipe builds from the commit above with `clang-r596125`.
 
-SHA-256 of `arm64/Image`: `40a25a16404a18a7139576a9ce79873bb85e4d124aa3aceb318e5fc4075f8639`
+SHA-256 of `arm64/Image`: `479ee25ee0b3b0988d982d37c3398390eb336f45ac53a49287091fad197c0c6c`
