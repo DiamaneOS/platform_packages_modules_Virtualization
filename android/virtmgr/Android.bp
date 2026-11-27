@@ -168,3 +168,37 @@ rust_test_host {
     edition: "2021",
     test_suites: ["general-tests"],
 }
+
+// DiamaneOS child launch and observed-exit receipts use the same source on the host and device.
+rust_test_host {
+    name: "virtmgr_launch_evidence_test",
+    crate_name: "virtmgr_launch_evidence_test",
+    srcs: ["src/launch_evidence.rs"],
+    test_suites: ["general-tests"],
+}
+
+// DiamaneOS release-build refusal of the decoder launch test marker.
+rust_test_host {
+    name: "virtmgr_launch_debug_test",
+    crate_name: "virtmgr_launch_debug_test",
+    srcs: ["src/launch_debug.rs"],
+    test_suites: ["general-tests"],
+}
+
+// DiamaneOS no-child cleanup uses the optional internal-service contract in the actual helper.
+rust_test_host {
+    name: "virtmgr_launch_cleanup_test",
+    crate_name: "virtmgr_launch_cleanup_test",
+    srcs: ["tests/launch_cleanup_host_test.rs"],
+    edition: "2021",
+    test_suites: ["general-tests"],
+}
+
+// DiamaneOS compile the actual early receipt without test-only retirement uses.
+rust_binary_host {
+    name: "virtmgr_launch_evidence_early_check",
+    srcs: ["tests/launch_evidence_early_check.rs"],
+    cfgs: ["early"],
+    flags: ["-Dwarnings"],
+    edition: "2021",
+}

@@ -119,11 +119,9 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
-import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.LinkedBlockingQueue;
 import java.util.zip.ZipFile;
 
 /**
@@ -159,6 +157,52 @@ public class VirtualMachine implements AutoCloseable {
             "android.permission.USE_CUSTOM_VIRTUAL_MACHINE";
 
     /**
+     * DiamaneOS terminal evidence for this instance's most recent launch attempt.
+     * UNKNOWN also covers running, pending and unreachable instances.
+     * @hide
+     */
+    @SystemApi
+    @SuppressLint({"UnflaggedApi", "Enum"})
+    public enum LifecycleOutcome {
+        DEFINITELY_NEVER_LAUNCHED,
+        CHILD_EXIT_OBSERVED,
+        UNKNOWN
+    }
+
+    /**
+     * Returns DiamaneOS launch evidence retained across errors, stop and close.
+     * A new run is refused while the preceding attempt remains unknown.
+     * @hide
+     */
+    @SystemApi
+    @SuppressLint("UnflaggedApi")
+    @WorkerThread
+    @NonNull
+    @RequiresPermission(USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION)
+    public LifecycleOutcome getLifecycleOutcome() {
+        mContext.enforceCallingOrSelfPermission(USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION,
+                "lifecycle outcome requires custom VM privilege");
+        synchronized (mLock) { return mLifecycle.outcome(); }
+    }
+
+    /**
+     * DiamaneOS retires the exact retained instance and returns only positive launch evidence.
+     * An unconsumed start is cancelled atomically and cannot launch later.
+     * A created child requires observed exit, otherwise the result remains UNKNOWN.
+     * @hide
+     */
+    @SystemApi
+    @SuppressLint("UnflaggedApi")
+    @WorkerThread
+    @NonNull
+    @RequiresPermission(USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION)
+    public LifecycleOutcome retireAndGetLifecycleOutcome() {
+        mContext.enforceCallingOrSelfPermission(USE_CUSTOM_VIRTUAL_MACHINE_PERMISSION,
+                "lifecycle retirement requires custom VM privilege");
+        synchronized (mLock) { return mLifecycle.retire(); }
+    }
+
+    /**
      * The lowest port number that can be used to communicate with the virtual machine payload.
      *
      * @see #connectToVsockServer
@@ -188,8 +232,7 @@ public class VirtualMachine implements AutoCloseable {
         TRACKPAD
     }
 
-    private BlockingQueue<Pair<InputEventType, MotionEvent>> mInputEventQueue =
-            new LinkedBlockingQueue<>();
+
 
     /**
      * Status of a virtual machine
@@ -375,9 +418,19 @@ public class VirtualMachine implements AutoCloseable {
 
     private final boolean mConnectVmConsole;
 
-    private final Executor mConsoleExecutor = Executors.newSingleThreadExecutor();
+    private ExecutorService mConsoleExecutor = Executors.newSingleThreadExecutor();
 
-    private ExecutorService mInputEventExecutor;
+    // DiamaneOS the input worker has an explicit retirement contract.
+    @GuardedBy("mLock")
+    @Nullable
+    private VmInputWorker<Pair<InputEventType, MotionEvent>> mInputEvents;
+
+    // DiamaneOS receipt is independent of the Java running reference and callback reason.
+    @GuardedBy("mLock")
+    private final VmLifecycle mLifecycle = new VmLifecycle();
+
+    @GuardedBy("mLock")
+    private boolean mMemoryCallbacksRegistered;
 
     /** Running instance of virtmgr that hosts VirtualizationService for this VM. */
     @GuardedBy("mLock")
@@ -921,11 +974,12 @@ public class VirtualMachine implements AutoCloseable {
         }
     }
 
-    private void handleStopped(int cid, @VirtualMachineCallback.StopReason int reason) {
+    private void handleStopped(int cid, @VirtualMachineCallback.StopReason int reason, Object runToken) {
         synchronized (mLock) {
             // Since we just took the lock, we can't assume the stopped
             // notification is for the current VM.
-            if (mCid == cid) {
+            // DiamaneOS a reused CID cannot make an old callback retire a newer launch.
+            if (mCid == cid && mLifecycle.matches(runToken)) {
                 if (mStopHandled) {
                     return;
                 }
@@ -943,13 +997,10 @@ public class VirtualMachine implements AutoCloseable {
      */
     @GuardedBy("mLock")
     private void dropVm() {
-        if (mInputEventExecutor != null) {
-            mInputEventExecutor.shutdownNow();
-            mInputEventExecutor = null;
-        }
-        if (mMemoryManagementCallbacks != null) {
-            mContext.unregisterComponentCallbacks(mMemoryManagementCallbacks);
-        }
+        // DiamaneOS keep terminal evidence before dropping the running reference.
+        mLifecycle.preserve();
+        stopInputEvents();
+        unregisterMemoryCallbacks();
         if (mVirtualMachine != null) {
             try {
                 mVirtualMachine.asBinder().unlinkToDeath(mVMDeathRecipient, /* flags= */ 0);
@@ -974,6 +1025,67 @@ public class VirtualMachine implements AutoCloseable {
             mVirtualizationService = null;
         }
         mCallbackTranslator = null;
+    }
+
+    // DiamaneOS only an active worker may take a copied event.
+    private boolean queueInputEvent(InputEventType type, MotionEvent event) {
+        synchronized (mLock) {
+            if (mInputEvents == null) return false;
+            MotionEvent copy = MotionEvent.obtainNoHistory(event);
+            boolean transferred = false;
+            try {
+                transferred = mInputEvents.offer(Pair.create(type, copy));
+                return transferred;
+            } finally { if (!transferred) copy.recycle(); }
+        }
+    }
+
+    // DiamaneOS the worker invokes the existing input operations without its queue monitor.
+    private void dispatchInputEvent(Pair<InputEventType, MotionEvent> event) {
+        switch (event.first) {
+            case TOUCH: sendMultiTouchEventInternal(event.second); break;
+            case TRACKPAD: sendTrackpadEventInternal(event.second); break;
+            case MOUSE: sendMouseEventInternal(event.second); break;
+        }
+    }
+
+    @GuardedBy("mLock")
+    private void stopInputEvents() {
+        VmInputWorker<Pair<InputEventType, MotionEvent>> worker = mInputEvents;
+        mInputEvents = null;
+        if (worker != null) worker.close();
+    }
+
+    @GuardedBy("mLock")
+    private void unregisterMemoryCallbacks() {
+        if (!mMemoryCallbacksRegistered || mMemoryManagementCallbacks == null) return;
+        mMemoryCallbacksRegistered = false;
+        try { mContext.unregisterComponentCallbacks(mMemoryManagementCallbacks); }
+        catch (RuntimeException ignored) {}
+    }
+
+    // DiamaneOS failed attempts and close release host resources independently of stop success.
+    @GuardedBy("mLock")
+    private void releaseRunResources() {
+        stopInputEvents();
+        unregisterMemoryCallbacks();
+        VmRunFiles.closeOne(mConsoleOutReader); mConsoleOutReader = null;
+        VmRunFiles.closeOne(mConsoleOutWriter); mConsoleOutWriter = null;
+        VmRunFiles.closeOne(mConsoleInReader); mConsoleInReader = null;
+        VmRunFiles.closeOne(mConsoleInWriter); mConsoleInWriter = null;
+        VmRunFiles.closeOne(mTeeConsoleOutReader); mTeeConsoleOutReader = null;
+        VmRunFiles.closeOne(mTeeConsoleOutWriter); mTeeConsoleOutWriter = null;
+        VmRunFiles.closeOne(mPtyFd); mPtyFd = null;
+        VmRunFiles.closeOne(mPtsFd); mPtsFd = null;
+        VmRunFiles.closeOne(mLogReader); mLogReader = null;
+        VmRunFiles.closeOne(mLogWriter); mLogWriter = null;
+        VmRunFiles.closeOne(mTouchSock); mTouchSock = null;
+        VmRunFiles.closeOne(mKeySock); mKeySock = null;
+        VmRunFiles.closeOne(mMouseSock); mMouseSock = null;
+        VmRunFiles.closeOne(mSwitchesSock); mSwitchesSock = null;
+        VmRunFiles.closeOne(mTrackpadSock); mTrackpadSock = null;
+        if (mConsoleExecutor != null) mConsoleExecutor.shutdownNow();
+        mConsoleExecutor = null;
     }
 
     /** If we have an IVirtualMachine in the running state return it, otherwise throw. */
@@ -1038,9 +1150,10 @@ public class VirtualMachine implements AutoCloseable {
     }
 
     private android.system.virtualizationservice.VirtualMachineConfig
-            createVirtualMachineConfigForRawFrom(VirtualMachineConfig vmConfig)
+            createVirtualMachineConfigForRawFrom(VirtualMachineConfig vmConfig, VmRunFiles files)
                     throws IllegalStateException, IOException {
-        VirtualMachineRawConfig rawConfig = vmConfig.toVsRawConfig();
+        // DiamaneOS every locally opened launch descriptor has a guard.
+        VirtualMachineRawConfig rawConfig = vmConfig.toVsRawConfig(files);
 
         // Handle input devices here
         List<InputDevice> inputDevices = new ArrayList<>();
@@ -1048,6 +1161,7 @@ public class VirtualMachine implements AutoCloseable {
             if (vmConfig.getCustomImageConfig().useTouch()) {
                 ParcelFileDescriptor[] pfds = ParcelFileDescriptor.createSocketPair();
                 mTouchSock = pfds[0];
+                files.track(pfds[1]);
                 InputDevice.MultiTouch t = new InputDevice.MultiTouch();
                 t.width = rawConfig.displayConfig.width;
                 t.height = rawConfig.displayConfig.height;
@@ -1057,6 +1171,7 @@ public class VirtualMachine implements AutoCloseable {
             if (vmConfig.getCustomImageConfig().useKeyboard()) {
                 ParcelFileDescriptor[] pfds = ParcelFileDescriptor.createSocketPair();
                 mKeySock = pfds[0];
+                files.track(pfds[1]);
                 InputDevice.Keyboard k = new InputDevice.Keyboard();
                 k.pfd = pfds[1];
                 inputDevices.add(InputDevice.keyboard(k));
@@ -1064,6 +1179,7 @@ public class VirtualMachine implements AutoCloseable {
             if (vmConfig.getCustomImageConfig().useMouse()) {
                 ParcelFileDescriptor[] pfds = ParcelFileDescriptor.createSocketPair();
                 mMouseSock = pfds[0];
+                files.track(pfds[1]);
                 InputDevice.Mouse m = new InputDevice.Mouse();
                 m.pfd = pfds[1];
                 inputDevices.add(InputDevice.mouse(m));
@@ -1071,6 +1187,7 @@ public class VirtualMachine implements AutoCloseable {
             if (vmConfig.getCustomImageConfig().useSwitches()) {
                 ParcelFileDescriptor[] pfds = ParcelFileDescriptor.createSocketPair();
                 mSwitchesSock = pfds[0];
+                files.track(pfds[1]);
                 InputDevice.Switches s = new InputDevice.Switches();
                 s.pfd = pfds[1];
                 inputDevices.add(InputDevice.switches(s));
@@ -1078,6 +1195,7 @@ public class VirtualMachine implements AutoCloseable {
             if (vmConfig.getCustomImageConfig().useTrackpad()) {
                 ParcelFileDescriptor[] pfds = ParcelFileDescriptor.createSocketPair();
                 mTrackpadSock = pfds[0];
+                files.track(pfds[1]);
                 InputDevice.Trackpad t = new InputDevice.Trackpad();
                 // TODO(b/347253952): make it configurable
                 // Set a large square area to avoid aspect ratio distortion.
@@ -1121,9 +1239,8 @@ public class VirtualMachine implements AutoCloseable {
     /** @hide */
     public boolean sendMouseEvent(MotionEvent event) {
         try {
-            mInputEventQueue.add(
-                    Pair.create(InputEventType.MOUSE, MotionEvent.obtainNoHistory(event)));
-            return true;
+            // DiamaneOS refuse input after worker retirement.
+            return queueInputEvent(InputEventType.MOUSE, event);
         } catch (Exception e) {
             Log.w(TAG, "Exception in sendMouseEvent(), " + e.toString());
             return false;
@@ -1221,9 +1338,8 @@ public class VirtualMachine implements AutoCloseable {
     /** @hide */
     public boolean sendMultiTouchEvent(MotionEvent event) {
         try {
-            mInputEventQueue.add(
-                    Pair.create(InputEventType.TOUCH, MotionEvent.obtainNoHistory(event)));
-            return true;
+            // DiamaneOS refuse input after worker retirement.
+            return queueInputEvent(InputEventType.TOUCH, event);
         } catch (Exception e) {
             Log.w(TAG, "Exception in sendMultiTouchEvent(), " + e.toString());
             return false;
@@ -1338,9 +1454,8 @@ public class VirtualMachine implements AutoCloseable {
     /** @hide */
     public boolean sendTrackpadEvent(MotionEvent event) {
         try {
-            mInputEventQueue.add(
-                    Pair.create(InputEventType.TRACKPAD, MotionEvent.obtainNoHistory(event)));
-            return true;
+            // DiamaneOS refuse input after worker retirement.
+            return queueInputEvent(InputEventType.TRACKPAD, event);
         } catch (Exception e) {
             Log.w(TAG, "Exception in sendTrackpadEvent(), " + e.toString());
             return false;
@@ -1692,6 +1807,13 @@ public class VirtualMachine implements AutoCloseable {
         synchronized (VirtualMachineManager.sCreateLock) {
             synchronized (mLock) {
                 checkStopped();
+                // DiamaneOS a previous unknown instance cannot be overwritten.
+                if (mLifecycle.begin(mVirtualMachine)) {
+                    dropVm();
+                    releaseRunResources();
+                }
+                boolean runSucceeded = false;
+                try (VmRunFiles files = new VmRunFiles()) {
 
                 mVirtualizationService = VirtualizationService.getInstance();
                 mStopHandled = false;
@@ -1742,40 +1864,13 @@ public class VirtualMachine implements AutoCloseable {
                                                     mConsoleOutWriter.getFileDescriptor())));
                     // If the VM is stopped then the tee worker thread would get an EOF or read()
                     // error which would tear down itself.
+                    if (mConsoleExecutor == null) mConsoleExecutor = Executors.newSingleThreadExecutor();
                     mConsoleExecutor.execute(tee);
                 } else if (mConnectVmConsole) {
                     consoleOutFd = mPtyFd;
                 } else if (mVmOutputCaptured) {
                     consoleOutFd = mConsoleOutWriter;
                 }
-                mInputEventExecutor = Executors.newSingleThreadExecutor();
-                mInputEventExecutor.execute(
-                        () -> {
-                            while (true) {
-                                try {
-                                    Pair<InputEventType, MotionEvent> event =
-                                            mInputEventQueue.take();
-                                    switch (event.first) {
-                                        case TOUCH:
-                                            sendMultiTouchEventInternal(event.second);
-                                            break;
-                                        case TRACKPAD:
-                                            sendTrackpadEventInternal(event.second);
-                                            break;
-                                        case MOUSE:
-                                            sendMouseEventInternal(event.second);
-                                            break;
-                                    }
-                                    event.second.recycle();
-                                } catch (Exception e) {
-                                    Log.w(
-                                            TAG,
-                                            "Exception in input event executor. Maybe shutting"
-                                                    + " down? "
-                                                    + e.toString());
-                                }
-                            }
-                        });
                 ParcelFileDescriptor consoleInFd = null;
                 if (mConnectVmConsole) {
                     consoleInFd = mPtyFd;
@@ -1786,7 +1881,7 @@ public class VirtualMachine implements AutoCloseable {
                 VirtualMachineConfig vmConfig = getConfig();
                 android.system.virtualizationservice.VirtualMachineConfig vmConfigParcel =
                         vmConfig.getCustomImageConfig() != null
-                                ? createVirtualMachineConfigForRawFrom(vmConfig)
+                                ? createVirtualMachineConfigForRawFrom(vmConfig, files)
                                 : createVirtualMachineConfigForAppFrom(vmConfig, service);
 
                 if (vmConfig.isEncryptedStorageEnabled()) {
@@ -1795,13 +1890,17 @@ public class VirtualMachine implements AutoCloseable {
                             vmConfig.getEncryptedStorageBytes());
                 }
 
+                // DiamaneOS a user-build-inert hook exercises real failed-create cleanup.
+                VmLaunchDebug.beforeCreate(mContext, mName, vmConfigParcel);
                 mVirtualMachine =
                         service.createVm(
                                 vmConfigParcel, consoleOutFd, consoleInFd, mLogWriter, null);
+                // DiamaneOS retain the exact remote before any registration can fail.
+                mLifecycle.attached(mVirtualMachine);
                 mCid = mVirtualMachine.getCid();
                 mCallbackTranslator =
                         new CallbackTranslator(
-                                this, service, mConfiguredCallback, mConfiguredCallbackExecutor);
+                                this, service, mConfiguredCallback, mConfiguredCallbackExecutor, mLifecycle.token());
                 mVirtualMachine.registerCallback(mCallbackTranslator);
 
                 // Copy to a local variable so that the lambdas below are not
@@ -1821,14 +1920,23 @@ public class VirtualMachine implements AutoCloseable {
 
                 if (mMemoryManagementCallbacks != null) {
                     mContext.registerComponentCallbacks(mMemoryManagementCallbacks);
+                    mMemoryCallbacksRegistered = true;
                 }
                 // TODO(b/406258175): here we need to register new callback to handle encrypted
                 // store KEK.
+                // DiamaneOS the receipt becomes unknown before issuing the launch RPC.
+                mLifecycle.startRequested();
+                VmLaunchDebug.beforeStart(mContext, mName, vmConfigParcel);
                 mVirtualMachine.start();
 
                 if (mConnectVmConsole) {
                     mVirtualMachine.setHostConsoleName(getHostConsoleName());
                 }
+                // DiamaneOS no input worker exists until every launch step succeeded.
+                mInputEvents = new VmInputWorker<>(this::dispatchInputEvent,
+                        event -> event.second.recycle(),
+                        error -> Log.w(TAG, "input dispatch failed", error));
+                runSucceeded = true;
             } catch (IOException e) {
                 throw new VirtualMachineException("failed to persist files", e);
                 } catch (IllegalStateException e) {
@@ -1842,6 +1950,10 @@ public class VirtualMachine implements AutoCloseable {
             } catch (RemoteException e) {
                 throw e.rethrowAsRuntimeException();
             }
+                } finally {
+                    // DiamaneOS failures release host workers and descriptors, never invent an exit.
+                    if (!runSucceeded) releaseRunResources();
+                }
         }
     }
     }
@@ -2146,21 +2258,31 @@ public class VirtualMachine implements AutoCloseable {
     @WorkerThread
     @Override
     public void close() {
-        try {
-            stop();
+        // DiamaneOS serialize close with rerun so cleanup cannot retire replacement resources.
+        synchronized (mLock) {
+            try {
+                stop();
 
-            synchronized (mLock) {
-                if (mVirtualizationService != null) {
-                    mVirtualizationService
-                            .getBinder()
-                            .asBinder()
-                            .unlinkToDeath(mVSDeathRecipient, /* flags= */ 0);
+                synchronized (mLock) {
+                    if (mVirtualizationService != null) {
+                        mVirtualizationService
+                                .getBinder()
+                                .asBinder()
+                                .unlinkToDeath(mVSDeathRecipient, /* flags= */ 0);
+                    }
+                }
+            } catch (Exception e) {
+                // A guest may exit concurrently with close.
+                Log.i(TAG, "Ignoring error on close()", e);
+            } finally {
+                // DiamaneOS closing a failed attempt still releases its host resources.
+                synchronized (mLock) {
+                    try {
+                        // DiamaneOS known no-child instances also release their native registration.
+                        if (mLifecycle.retireKnown(mVirtualMachine)) dropVm();
+                    } finally { releaseRunResources(); }
                 }
             }
-        } catch (Exception e) {
-            // Deliberately ignored; this almost certainly means the VM exited just as
-            // we tried to stop it.
-            Log.i(TAG, "Ignoring error on close()", e);
         }
     }
 
@@ -2781,16 +2903,20 @@ public class VirtualMachine implements AutoCloseable {
         @Nullable
         private Executor mCallbackExecutor;
 
+        // DiamaneOS immutable identity of the launch that registered this translator.
+        private final Object mRunToken;
+
         public CallbackTranslator(
                 VirtualMachine virtualMachine,
                 IVirtualizationService service,
                 VirtualMachineCallback callback,
-                Executor callbackExecutor)
+                Executor callbackExecutor, Object runToken)
                 throws RemoteException {
             this.mVirtualMachine = new WeakReference<>(virtualMachine);
             this.mService = new WeakReference<>(service);
             this.mCallback = callback;
             this.mCallbackExecutor = callbackExecutor;
+            this.mRunToken = runToken;
         }
 
         @FunctionalInterface
@@ -2842,11 +2968,10 @@ public class VirtualMachine implements AutoCloseable {
         @Override
         public void onDied(int cid, int reason) {
             int translatedReason = getTranslatedReason(reason);
-            executeCallback(
-                    (cb, vm) -> {
-                        vm.handleStopped(translatedReason, cid);
-                        cb.onStopped(vm, reason);
-                    });
+            // DiamaneOS retire framework resources even without an application callback or executor.
+            VirtualMachine vm = mVirtualMachine.get();
+            if (vm != null) vm.handleStopped(cid, translatedReason, mRunToken);
+            executeCallback((cb, current) -> cb.onStopped(current, translatedReason));
         }
 
         @Override
@@ -2871,6 +2996,8 @@ public class VirtualMachine implements AutoCloseable {
         @VirtualMachineCallback.StopReason
         private int getTranslatedReason(int reason) {
             switch (reason) {
+                case STOP_REASON_VIRTUALIZATION_SERVICE_DIED:
+                    return STOP_REASON_VIRTUALIZATION_SERVICE_DIED;
                 case DeathReason.INFRASTRUCTURE_ERROR:
                     return STOP_REASON_INFRASTRUCTURE_ERROR;
                 case DeathReason.KILLED:

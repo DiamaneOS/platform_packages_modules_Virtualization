@@ -17,6 +17,7 @@
 package de.diamaneos.decodervm;
 
 import android.content.Context;
+import android.system.virtualmachine.VirtualMachine;
 import android.system.virtualmachine.VirtualMachineConfig;
 import android.system.virtualmachine.VirtualMachineCustomImageConfig;
 
@@ -30,10 +31,21 @@ final class DecoderVmApiTwin {
     private DecoderVmApiTwin() {
     }
 
+    // DiamaneOS the consumer's typed lifecycle API is also checked by every APEX build.
+    static VirtualMachine.LifecycleOutcome lifecycle(VirtualMachine vm) {
+        return vm.getLifecycleOutcome();
+    }
+
+    // DiamaneOS the exact-instance retirement operation is also a typed dependency.
+    static VirtualMachine.LifecycleOutcome retireLifecycle(VirtualMachine vm) {
+        return vm.retireAndGetLifecycleOutcome();
+    }
+
     static VirtualMachineConfig rawConfig(Context context, String kernel, String initrd, String instance,
             long memoryBytes) {
         VirtualMachineCustomImageConfig.Builder b = new VirtualMachineCustomImageConfig.Builder();
         b.setName("decoder");
+        b.addParam("diamaneos.debug.fail_spawn");
         b.setKernelPath(kernel);
         b.setInitrdPath(initrd);
         VirtualMachineCustomImageConfig.Disk disk = VirtualMachineCustomImageConfig.Disk.RWDisk(null);

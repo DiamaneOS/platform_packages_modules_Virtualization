@@ -220,7 +220,7 @@ impl CrosvmCommand {
         command.add_network_arg(context)?;
         command.add_file_backed_mapping_arg(context)?;
         #[cfg(target_arch = "aarch64")]
-        command.add_vm_pool_arg(context);
+        command.add_vm_pool_arg(context)?;
         command.add_assigned_devices_arg(context)?;
         command.add_dump_dtb_arg(context)?;
         command.add_gdb_arg(context)?;
@@ -1085,11 +1085,11 @@ impl CrosvmCommand {
     /// DiamaneOS: a protected VM's RAM from the pool the kernel sets aside at boot, when this caller may use it and
     /// it has room (vm_pool.rs). Otherwise the RAM stays ordinary memory.
     #[cfg(target_arch = "aarch64")]
-    fn add_vm_pool_arg(&mut self, context: &RunContext) {
+    fn add_vm_pool_arg(&mut self, context: &RunContext) -> Result<()> {
         let config = context.config;
         // A client that brings its own memory files keeps them.
         if !config.protectedVm || !config.customMemoryBackingFiles.is_empty() {
-            return;
+            return Ok(());
         }
         // crosvm's aarch64 RAM region starts at 0x8000_0000 and holds the VM's memory and the ramdump reserve. The
         // firmware region and the bounce buffers follow below.
@@ -1097,7 +1097,7 @@ impl CrosvmCommand {
         let memory_mib: u32 =
             config.memoryMib.try_into().ok().and_then(NonZeroU32::new).map_or(256, NonZeroU32::get);
         let ram = u64::from(memory_mib.saturating_add(Self::get_ramdump_mib(context))) << 20;
-        if let Some(file) = crate::vm_pool::take(ram) {
+        if let Some(file) = crate::vm_pool::take(ram).context("the VM's RAM")? {
             let path = self.add_preserved_fd(file);
             self.args([
                 "--file-backed-mapping",
@@ -1114,7 +1114,8 @@ impl CrosvmCommand {
             Ok(p) if p.as_deref() != Some("none")
         );
         if runs_pvmfw {
-            let fw = crate::vm_pool::take_now(AARCH64_PROTECTED_VM_FW_SIZE, "firmware region");
+            let fw = crate::vm_pool::take_now(AARCH64_PROTECTED_VM_FW_SIZE, "firmware region")
+                .context("the VM's firmware region")?;
             if let Some(file) = fw {
                 let path = self.add_preserved_fd(file);
                 self.args([
@@ -1132,7 +1133,9 @@ impl CrosvmCommand {
         // Never waited for.
         let swiotlb = u64::from(Self::get_swiotlb_mib(config)) << 20;
         if swiotlb > 0 {
-            if let Some(file) = crate::vm_pool::take_now(swiotlb, "bounce buffers") {
+            if let Some(file) =
+                crate::vm_pool::take_now(swiotlb, "bounce buffers").context("the VM's bounce buffers")?
+            {
                 let path = self.add_preserved_fd(file);
                 let addr = AARCH64_PHYS_MEM_START + ram;
                 self.args([
@@ -1141,6 +1144,7 @@ impl CrosvmCommand {
                 ]);
             }
         }
+        Ok(())
     }
 
     fn add_assigned_devices_arg(&mut self, context: &RunContext) -> Result<()> {
@@ -1378,7 +1382,7 @@ impl VmState {
             vhost_user_devices.extend(maybe_run_virtiosnd(&config)?);
 
             // If this fails and returns an error, `self` will be left in the `Failed` state.
-            let child = Arc::new(run_vm(config, &instance.crosvm_control_socket_path)?);
+            let child = Arc::new(run_vm(config, &instance.crosvm_control_socket_path, &instance.launch_evidence)?);
 
             // It is too late to add a system API to control the ballooning behavior, so we
             // automically enable it only when the payload is granted
@@ -1617,6 +1621,8 @@ impl SharedMemoryHandler {
 pub struct VmInstance {
     /// The current state of the VM.
     pub vm_state: Mutex<VmState>,
+    // DiamaneOS evidence survives failed start and failed stop.
+    pub launch_evidence: crate::launch_evidence::LaunchEvidence,
     /// Condvar that is notified when `vm_state` changes.
     vm_state_changed_condvar: Condvar,
     /// Whether this VmInstance requires VirtualMachineService
@@ -1702,6 +1708,8 @@ impl VmInstance {
         let instance = VmInstance {
             vm_state: Mutex::new(VmState::NotStarted { config: Box::new(config) }),
             vm_state_changed_condvar: Condvar::new(),
+            // DiamaneOS per-instance receipt starts without a completed request.
+            launch_evidence: Default::default(),
             requires_vm_service,
             vm_service: Mutex::new(None),
             cid,
@@ -1783,6 +1791,8 @@ impl VmInstance {
         match &result {
             Err(e) => error!("Error waiting for crosvm({}) instance to die: {}", child.id(), e),
             Ok(status) => {
+                // DiamaneOS successful wait is positive child-exit evidence.
+                self.launch_evidence.child_exit_observed();
                 info!("crosvm({}) exited with status {}", child.id(), status);
                 if let Some(exit_status_code) = status.code() {
                     if exit_status_code == CROSVM_WATCHDOG_REBOOT_STATUS {
@@ -2036,7 +2046,18 @@ impl VmInstance {
                     Err(mpsc::SendError(())) => {} // success!
                 }
             }
-            VmState::NotStarted { .. } | VmState::Dead | VmState::Failed => {
+            // DiamaneOS consume an unstarted instance before releasing its global registration.
+            VmState::NotStarted { .. } => {
+                *vm_state_mg = VmState::Failed;
+                self.launch_evidence.cancel_unstarted();
+                drop(vm_state_mg);
+                crate::launch_cleanup::retire_never_launched(self);
+            }
+            VmState::Failed if self.launch_evidence.outcome() == crate::launch_evidence::Outcome::NeverLaunched => {
+                drop(vm_state_mg);
+                crate::launch_cleanup::retire_never_launched(self);
+            }
+            VmState::Dead | VmState::Failed => {
                 drop(vm_state_mg); // make sure self.vm_state is not held
 
                 // TODO: if it were ever running, we may still need to join
@@ -2528,7 +2549,8 @@ fn maybe_run_virtiosnd(config: &CrosvmConfig) -> io::Result<Option<SharedChild>>
 }
 
 /// Starts an instance of `crosvm` to manage a new VM.
-fn run_vm(config: CrosvmConfig, crosvm_control_socket_path: &Path) -> Result<SharedChild, Error> {
+fn run_vm(config: CrosvmConfig, crosvm_control_socket_path: &Path,
+        launch: &crate::launch_evidence::LaunchEvidence) -> Result<SharedChild, Error> {
     let mut command = Command::new(CROSVM_PATH);
 
     command.arg0(config.command.arg0);
@@ -2574,7 +2596,14 @@ fn run_vm(config: CrosvmConfig, crosvm_control_socket_path: &Path) -> Result<Sha
 
     print_crosvm_args(&command);
 
+    // DiamaneOS only a debuggable decoder can force the no-child failure boundary.
+    if crate::launch_debug::before_child(&config.name, command.get_args(),
+            system_properties::read_bool("ro.debuggable", false).unwrap_or(false)) {
+        bail!("debug forced crosvm launch failure before child creation");
+    }
     let result = SharedChild::spawn(&mut command)?;
+    // DiamaneOS record before any post-spawn work can fail.
+    launch.child_created();
     debug!("Spawned crosvm({}).", result.id());
     Ok(result)
 }

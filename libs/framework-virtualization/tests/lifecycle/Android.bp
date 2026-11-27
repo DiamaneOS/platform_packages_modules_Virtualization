@@ -1,0 +1,12 @@
+package {
+    default_applicable_licenses: ["Android-Apache-2.0"],
+}
+
+// DiamaneOS the real receipt, input worker and file guard run with narrow host API stand-ins.
+java_test_host {
+    name: "VirtualMachineLifecycleHostTest",
+    srcs: ["src/**/*.java", ":framework-virtualization-lifecycle-src"],
+    static_libs: ["junit"],
+    test_options: { unit_test: true },
+    test_suites: ["general-tests"],
+}
