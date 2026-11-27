@@ -28,6 +28,7 @@ sign_virt_apex uses external tools which are assumed to be available via PATH.
 """
 import argparse
 import binascii
+import gzip
 import builtins
 import hashlib
 import os
@@ -38,6 +39,14 @@ import sys
 import tempfile
 import traceback
 from collections import Counter
+import guest_vm_contract as guest_contract
+
+# DiamaneOS: compiled signers carry hashes from the independent Soong producer outputs.
+try:
+    from guest_vm_role_digests import ROLE_DIGESTS
+except ImportError:
+    # Standalone source verification uses the reviewed build pins, never the input pair.
+    ROLE_DIGESTS = guest_contract.ROLE_DIGESTS
 from concurrent import futures
 
 # pylint: disable=line-too-long,consider-using-with
@@ -140,8 +149,9 @@ def RunCommand(args, cmd, env=None, expected_return_values=None):
     if args.verbose or p.returncode not in expected_return_values:
         print(output.rstrip())
 
-    assert p.returncode in expected_return_values, (
-        '%d Failed to execute: ' + ' '.join(cmd)) % p.returncode
+    if not (p.returncode in expected_return_values):
+        raise ValueError((
+        '%d Failed to execute: ' + ' '.join(cmd)) % p.returncode)
     return (output, p.returncode)
 
 
@@ -253,7 +263,8 @@ def print_descriptors_diff(
     missing = list((orig_counts - upd_counts).elements())
     extra = list((upd_counts - orig_counts).elements())
 
-    assert missing or extra, "print_descriptors_diff called with no differences."
+    if not (missing or extra):
+        raise ValueError("print_descriptors_diff called with no differences.")
 
     output_list = [
         f"{descriptor_type} descriptor list mismatch for {context}:",
@@ -286,8 +297,8 @@ def print_dict_diff(
 
     common = common - set(modified.keys())
 
-    assert extra or missing or modified, \
-        f"print_dict_diff called for {context}, but no differences found."
+    if not (extra or missing or modified):
+        raise ValueError(f"print_dict_diff called for {context}, but no differences found.")
 
     output_list = [
         f"{dict_type} mismatch for {context}:",
@@ -320,26 +331,28 @@ def print_dict_diff(
 
 def check_resigned_image_avb_info(image_path, original_info, original_descriptors, args):
     updated_info, updated_descriptors = AvbInfo(args, image_path)
-    assert original_info is not None, f'no avbinfo on original image: {image_path}'
-    assert updated_info is not None, f'no avbinfo on resigned image: {image_path}'
+    if not (original_info is not None):
+        raise ValueError(f'no avbinfo on original image: {image_path}')
+    if not (updated_info is not None):
+        raise ValueError(f'no avbinfo on resigned image: {image_path}')
     assert_different_value(original_info, updated_info, "Public key (sha1)", image_path)
     updated_public_key = updated_info.pop("Public key (sha1)")
     if not hasattr(check_resigned_image_avb_info, "new_public_key"):
         check_resigned_image_avb_info.new_public_key = updated_public_key
     else:
-        assert check_resigned_image_avb_info.new_public_key == updated_public_key, \
-            "All images should be resigned with the same public key. Expected public key (sha1):" \
+        if not (check_resigned_image_avb_info.new_public_key == updated_public_key):
+            raise ValueError("All images should be resigned with the same public key. Expected public key (sha1):" \
             f" {check_resigned_image_avb_info.new_public_key}, actual public key (sha1): " \
-            f"{updated_public_key}, Path: {image_path}"
+            f"{updated_public_key}, Path: {image_path}")
     original_info.pop("Public key (sha1)")
     if args.do_not_validate_avb_version:
         original_info.pop("Release String")
         updated_info.pop("Release String")
 
     # Verify the descriptors of the original and updated images.
-    assert len(original_descriptors) == len(updated_descriptors), \
-        f"Number of descriptors should be the same for {image_path}. " \
-        f"Original descriptors: {original_descriptors}, updated descriptors: {updated_descriptors}"
+    if not (len(original_descriptors) == len(updated_descriptors)):
+        raise ValueError(f"Number of descriptors should be the same for {image_path}. " \
+        f"Original descriptors: {original_descriptors}, updated descriptors: {updated_descriptors}")
 
     # Verify the property descriptors
     original_prop_descriptors = sorted(find_all_values_by_key(original_descriptors, "Prop"))
@@ -374,7 +387,8 @@ def AddHashFooter(args, key, image_path, additional_images=()):
     if os.path.basename(image_path) in args.key_overrides:
         key = args.key_overrides[os.path.basename(image_path)]
     info, descriptors = AvbInfo(args, image_path)
-    assert info is not None, f'no avbinfo: {image_path}'
+    if not (info is not None):
+        raise ValueError(f'no avbinfo: {image_path}')
 
     # Extract hash descriptor of original image.
     hash_descriptors_original = extract_hash_descriptors(descriptors, drop_digest)
@@ -382,18 +396,18 @@ def AddHashFooter(args, key, image_path, additional_images=()):
         _, additional_desc = AvbInfo(args, additional_image)
         hash_descriptors = extract_hash_descriptors(additional_desc, drop_digest)
         for k, v in hash_descriptors.items():
-            assert v == hash_descriptors_original[k], \
-                f"Hash descriptor of {k} in {additional_image} and {image_path} should be " \
-                f"the same. {additional_image}: {v}, {image_path}: {hash_descriptors_original[k]}"
+            if not (v == hash_descriptors_original[k]):
+                raise ValueError(f"Hash descriptor of {k} in {additional_image} and {image_path} should be " \
+                f"the same. {additional_image}: {v}, {image_path}: {hash_descriptors_original[k]}")
             del hash_descriptors_original[k]
-    assert len(hash_descriptors_original) == 1, \
-        f"Only one hash descriptor is expected for {image_path} after removing " \
-        f"additional images. Hash descriptors: {hash_descriptors_original}"
+    if not (len(hash_descriptors_original) == 1):
+        raise ValueError(f"Only one hash descriptor is expected for {image_path} after removing " \
+        f"additional images. Hash descriptors: {hash_descriptors_original}")
     [(original_image_partition_name, original_image_descriptor)] = hash_descriptors_original.items()
-    assert info["Original image size"] == original_image_descriptor["Image Size"], \
-        f"Original image size should be the same as the image size in the hash descriptor " \
+    if not (info["Original image size"] == original_image_descriptor["Image Size"]):
+        raise ValueError(f"Original image size should be the same as the image size in the hash descriptor " \
         f"for {image_path}. Original image size: {info['Original image size']}, " \
-        f"image size in the hash descriptor: {original_image_descriptor['Image Size']}"
+        f"image size in the hash descriptor: {original_image_descriptor['Image Size']}")
 
     partition_size = str(ReadBytesSize(info['Image size']))
     algorithm = info['Algorithm']
@@ -623,13 +637,6 @@ def TargetFiles(input_dir):
             ret[f'gki-{ver}_initrd_normal.img']     = initrd_normal
             ret[f'gki-{ver}_initrd_debuggable.img'] = initrd_debug
 
-    # DiamaneOS: the filesystem VM's kernel and its initramfs (guest/diamaneos). The initramfs carries no
-    # bootconfig, so its key must not end in initrd_normal.img or initrd_debuggable.img (IsInitrdImage).
-    fsvm_kernel = os.path.join(input_dir, 'etc/fs/fsvm_kernel')
-    if os.path.isfile(fsvm_kernel):
-        ret['fsvm_kernel'] = fsvm_kernel
-        ret['fsvm_initrd'] = os.path.join(input_dir, 'etc/fsvm_initrd.img')
-
     kernel_16k = os.path.join(input_dir, 'etc/fs/microdroid_kernel_16k')
     initrd_normal_16k = os.path.join(input_dir, 'etc/microdroid_16k_initrd_normal.img')
     initrd_debug_16k = os.path.join(input_dir, 'etc/microdroid_16k_initrd_debuggable.img')
@@ -638,7 +645,92 @@ def TargetFiles(input_dir):
         ret['16k_initrd_normal.img'] = initrd_normal_16k
         ret['16k_initrd_debuggable.img'] = initrd_debug_16k
 
+    # DiamaneOS: the protected VM guests.
+    ret.update(GuestVmFiles(input_dir))
+
     return ret
+
+# DiamaneOS: the protected VM guests, the decode service VM (guest/decoder_vm) and the filesystem VM
+# (guest/diamaneos). Each is a kernel signed over its own initramfs, which stands for both descriptors pvmfw knows. The
+# initramfs carries no bootconfig, so its key must not end in initrd_normal.img or initrd_debuggable.img
+# (IsInitrdImage). Role: (kernel key, kernel path, initramfs key, initramfs path).
+GUEST_VMS = {
+    'decoder_vm': ('decoder_vm_kernel', 'etc/fs/decoder_vm_kernel',
+                   'decoder_vm_initrd', 'etc/decoder_vm_initrd.img'),
+    'fsvm': ('fsvm_kernel', 'etc/fs/fsvm_kernel', 'fsvm_initrd', 'etc/fsvm_initrd.img'),
+}
+
+# The files each guest's initramfs holds: what makes a pair the decode service VM's or the filesystem VM's, so that
+# a valid pair in the other's place fails. diamaneos-tools' image checks hold the same lists.
+GUEST_VM_INITRD_FILES = {role: set(files) for role, files in guest_contract.FILES.items()}
+
+GUEST_VM_KEYS = {key for (kernel, _, initrd, _) in GUEST_VMS.values() for key in (kernel, initrd)}
+
+# The descriptors of a guest kernel, each once: the kernel itself and the initramfs twice.
+GUEST_VM_DESCRIPTORS = ['boot', 'initrd_debug', 'initrd_normal']
+
+
+def GuestVmFiles(input_dir):
+    """DiamaneOS: the guests' kernels and initramfs, as TargetFiles keys.
+
+    Every guest kernel must be there. Only a tree without service_vm (every arch but arm64) has empty kernels, and
+    then nothing of that guest is signed. A kernel without its initramfs is an error: signing everything else would
+    ship a kernel that pvmfw refuses, which shows only on a phone.
+    """
+    arm64 = os.path.exists(os.path.join(input_dir, virt_apex_non_gki_files['service_vm']))
+    ret = {}
+    for role, (kernel_key, kernel_path, initrd_key, initrd_path) in GUEST_VMS.items():
+        kernel = os.path.join(input_dir, kernel_path)
+        initrd = os.path.join(input_dir, initrd_path)
+        if not os.path.isfile(kernel):
+            raise ValueError(f'the {role} kernel is missing: {kernel}')
+        if os.path.getsize(kernel) == 0:
+            if arm64:
+                raise ValueError(f'the {role} kernel is empty in an arm64 APEX: {kernel}')
+            continue
+        if not os.path.isfile(initrd) or os.path.getsize(initrd) == 0:
+            raise ValueError(f'the {role} initramfs is missing or empty: {initrd}')
+        ret[kernel_key] = kernel
+        ret[initrd_key] = initrd
+    return ret
+
+
+def InitrdFiles(initrd_file):
+    """DiamaneOS: the shared canonical archive contract, retaining duplicate-name errors."""
+    with open(initrd_file, 'rb') as stream:
+        return guest_contract.cpio_members(stream.read())
+
+
+def VerifyGuestVm(args, role, key, kernel_file, initrd_file):
+    """DiamaneOS: the common guest contract and an independently carried build role digest."""
+    info, descriptors = AvbInfo(args, kernel_file)
+    if info is None:
+        raise ValueError(f'no avbinfo: {kernel_file}')
+    names = sorted((kind, d.get('Partition Name') if isinstance(d, dict) else d) for kind, d in descriptors)
+    if names != [('Hash descriptor', n) for n in GUEST_VM_DESCRIPTORS]:
+        raise ValueError(f'{kernel_file}: descriptors {names}, not one each of {GUEST_VM_DESCRIPTORS}')
+    with open(kernel_file, 'rb') as stream:
+        kernel = stream.read()
+    with open(initrd_file, 'rb') as stream:
+        initrd = stream.read()
+    meta = guest_contract.avb_vbmeta(kernel)
+    problems = guest_contract.descriptor_problems(meta, kernel, initrd)
+    signature = guest_contract.avb_signature_problem(meta)
+    if signature:
+        problems.append(signature)
+    if problems:
+        raise ValueError(f'{kernel_file}: {", ".join(problems)}')
+    problem = guest_contract.initrd_problem(role, initrd, ROLE_DIGESTS)
+    if problem:
+        raise ValueError(f'{initrd_file}: {problem}')
+    if key is not None:
+        key = args.key_overrides.get(os.path.basename(kernel_file), key)
+        with tempfile.NamedTemporaryFile() as public:
+            ExtractAvbPubkey(args, key, public.name)
+            with open(public.name, 'rb') as stream:
+                if meta['key'] != stream.read():
+                    raise ValueError(f'{kernel_file} is not signed with {key}')
+
 
 def IsInitrdImage(path):
     return path.endswith('initrd_normal.img') or path.endswith('initrd_debuggable.img')
@@ -731,6 +823,18 @@ def SignVirtApex(args):
     resign_kernel_tasks = [resign_kernel('kernel', 'initrd_normal.img', 'initrd_debuggable.img')]
     original_kernels = {"kernel" : original_kernel_descriptors}
 
+    # DiamaneOS: sign each guest's kernel again over its unchanged initramfs. The pair must be the one the build made
+    # for its role before (the digests the build put in the kernel match the initramfs) and after (with the new key).
+    # The kernels are left out of original_kernels on purpose: the service VM holds no digests of them, and their
+    # initramfs digests do not change, which update_initrd_digests_in_service_vm would reject.
+    for role, (kernel_key, _, initrd_key, _) in GUEST_VMS.items():
+        if kernel_key not in files:
+            continue
+        VerifyGuestVm(args, role, None, files[kernel_key], files[initrd_key])
+        task = resign_kernel(kernel_key, initrd_key, initrd_key)
+        resign_kernel_tasks.append(task)
+        Async(VerifyGuestVm, args, role, key, files[kernel_key], files[initrd_key], wait=[task])
+
     for ver in gki_versions:
         if f'gki-{ver}_kernel' in files:
             kernel_name = f'gki-{ver}_kernel'
@@ -741,12 +845,6 @@ def SignVirtApex(args):
                 f'gki-{ver}_initrd_debuggable.img')
             resign_kernel_tasks.append(task)
             original_kernels[kernel_name] = original_kernel_descriptors
-
-    # DiamaneOS: sign the filesystem VM's kernel again over its unchanged initramfs. It is left out of
-    # original_kernels on purpose: the service VM holds no digests of it, and its initramfs digests do not change,
-    # which update_initrd_digests_in_service_vm would reject.
-    if 'fsvm_kernel' in files:
-        resign_kernel_tasks.append(resign_kernel('fsvm_kernel', 'fsvm_initrd', 'fsvm_initrd'))
 
     # Re-sign service_vm if it exists; it only exists in arm64 environment.
     if os.path.exists(files['service_vm']):
@@ -761,29 +859,29 @@ def resign_service_vm(args, key, service_vm_path):
 
     # Verify the new AVB footer.
     updated_info, updated_descriptors = AvbInfo(args, service_vm_path)
-    assert len(updated_descriptors) == len(original_descriptors), \
-        (f"The number of descriptors must remain the same after resigning. "
+    if not (len(updated_descriptors) == len(original_descriptors)):
+        raise ValueError(f"The number of descriptors must remain the same after resigning. "
          f"Got {len(updated_descriptors)} but expected {len(original_descriptors)}. "
          f"Updated descriptors: {updated_descriptors}")
 
     updated_prop = find_all_values_by_key(updated_descriptors, "Prop")
     original_prop = find_all_values_by_key(original_descriptors, "Prop")
-    assert original_prop == updated_prop, \
-        (f"Prop descriptors unexpectly changed after resigning service_vm. "
+    if not (original_prop == updated_prop):
+        raise ValueError(f"Prop descriptors unexpectly changed after resigning service_vm. "
          f"Original: {original_prop}, Updated: {updated_prop}")
-    assert updated_info["Rollback Index"] != "0", \
-        "Rollback index should not be zero for service_vm."
+    if not (updated_info["Rollback Index"] != "0"):
+        raise ValueError("Rollback index should not be zero for service_vm.")
 
     # Verify the only hash descriptor of service_vm.
     updated_hash_descriptors = extract_hash_descriptors(updated_descriptors)
-    assert len(updated_hash_descriptors) == 1, \
-        f"There should be only one hash descriptor for service_vm. " \
-        f"Updated hash descriptors: {updated_hash_descriptors}"
+    if not (len(updated_hash_descriptors) == 1):
+        raise ValueError(f"There should be only one hash descriptor for service_vm. " \
+        f"Updated hash descriptors: {updated_hash_descriptors}")
 
 def assert_different_value(original, updated, key, context):
-    assert original[key] != updated[key], \
-        f"Value of '{key}' should change for '{context}'" \
-        f"Original value: {original[key]}, updated value: {updated[key]}"
+    if not (original[key] != updated[key]):
+        raise ValueError(f"Value of '{key}' should change for '{context}'" \
+        f"Original value: {original[key]}, updated value: {updated[key]}")
 
 def update_initrd_digests_of_kernels_in_service_vm(original_kernels, args, files):
     # Update the hashes of initrd_normal and initrd_debug in service_vm if the
@@ -809,30 +907,30 @@ def update_initrd_digests_in_service_vm(
         original_descriptors, lambda x: binascii.unhexlify(x['Digest']))
     updated_digests = extract_hash_descriptors(
         updated_descriptors, lambda x: binascii.unhexlify(x['Digest']))
-    assert original_digests.pop("boot") == updated_digests.pop("boot"), \
-        "Hash descriptor of boot should not change for " + kernel_name + \
+    if not (original_digests.pop("boot") == updated_digests.pop("boot")):
+        raise ValueError("Hash descriptor of boot should not change for " + kernel_name + \
         f"\nOriginal descriptors: {original_descriptors}, " \
-        f"\nUpdated descriptors: {updated_descriptors}"
+        f"\nUpdated descriptors: {updated_descriptors}")
 
     # Check that the original and updated digests are different before updating service_vm.
     partition_names = {'initrd_normal', 'initrd_debug'}
-    assert set(original_digests.keys()) == set(updated_digests.keys()) == partition_names, \
-        f"Original digests' partitions should be {partition_names}. " \
-        f"Original digests: {original_digests}. Updated digests: {updated_digests}"
-    assert set(original_digests.values()).isdisjoint(updated_digests.values()), \
-        "Digests of initrd_normal and initrd_debug should change. " \
+    if not (set(original_digests.keys()) == set(updated_digests.keys()) == partition_names):
+        raise ValueError(f"Original digests' partitions should be {partition_names}. " \
+        f"Original digests: {original_digests}. Updated digests: {updated_digests}")
+    if not (set(original_digests.values()).isdisjoint(updated_digests.values())):
+        raise ValueError("Digests of initrd_normal and initrd_debug should change. " \
         f"Original descriptors: {original_descriptors}, " \
-        f"updated descriptors: {updated_descriptors}"
+        f"updated descriptors: {updated_descriptors}")
 
     for partition_name, original_digest in original_digests.items():
         updated_digest = updated_digests[partition_name]
-        assert len(original_digest) == len(updated_digest), \
-            f"Length of original_digest and updated_digest must be the same for {partition_name}." \
-            f" Original digest: {original_digest}, updated digest: {updated_digest}"
+        if not (len(original_digest) == len(updated_digest)):
+            raise ValueError(f"Length of original_digest and updated_digest must be the same for {partition_name}." \
+            f" Original digest: {original_digest}, updated digest: {updated_digest}")
 
         new_content = content.replace(original_digest, updated_digest)
-        assert len(new_content) == len(content), \
-            "Length of new_content and content must be the same."
+        if not (len(new_content) == len(content)):
+            raise ValueError("Length of new_content and content must be the same.")
         content = new_content
 
     return content
@@ -862,8 +960,10 @@ def VerifyVirtApex(args):
 
     def check_avb_pubkey(file):
         info, _ = AvbInfo(args, file)
-        assert info is not None, f'no avbinfo: {file}'
-        assert info['Public key (sha1)'] == pubkey_digest, f'pubkey mismatch: {file}'
+        if not (info is not None):
+            raise ValueError(f'no avbinfo: {file}')
+        if not (info['Public key (sha1)'] == pubkey_digest):
+            raise ValueError(f'pubkey mismatch: {file}')
 
     for k, f in files.items():
         if IsInitrdImage(k):
@@ -872,11 +972,23 @@ def VerifyVirtApex(args):
         if k == 'service_vm' and not os.path.exists(f):
             # service_vm only exists in arm64 environment.
             continue
+        if k in GUEST_VM_KEYS:
+            # DiamaneOS: checked by VerifyGuestVms below.
+            continue
         if k == 'super.img':
             Async(check_avb_pubkey, system_a_img)
         else:
             # Check pubkey for other files using avbtool
             Async(check_avb_pubkey, f)
+
+    VerifyGuestVms(args, key, files)
+
+
+def VerifyGuestVms(args, key, files):
+    """DiamaneOS: each guest's pair together, the initramfs through its kernel (it has no footer of its own)."""
+    for role, (kernel_key, _, initrd_key, _) in GUEST_VMS.items():
+        if kernel_key in files:
+            Async(VerifyGuestVm, args, role, key, files[kernel_key], files[initrd_key])
 
 
 def main(argv):
