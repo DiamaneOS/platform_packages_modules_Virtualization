@@ -25,6 +25,8 @@ mod payload;
 mod secretkeeper;
 mod selinux;
 mod virtualmachine;
+#[cfg(target_arch = "aarch64")]
+mod vm_pool;
 
 use crate::virtualmachine::VirtualizationService;
 use anyhow::{bail, Result};
