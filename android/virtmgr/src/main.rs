@@ -22,6 +22,9 @@ mod debug_config;
 mod dt_overlay;
 mod host_services;
 mod payload;
+// DiamaneOS: the VM manager's seccomp filter (seccomp.rs).
+#[cfg(not(early))]
+mod seccomp;
 mod secretkeeper;
 mod selinux;
 mod virtualmachine;
@@ -146,6 +149,13 @@ fn main() {
     service_impl.set_server(std::sync::Arc::downgrade(&server));
 
     info!("Started VirtualizationService RpcServer. Ready to accept connections");
+
+    // DiamaneOS: the seccomp filter, on every thread, before the client can send anything.
+    #[cfg(not(early))]
+    match seccomp::install() {
+        Ok(how) => info!("seccomp filter on ({how} anything else), {}", seccomp::USER_BUILDS),
+        Err(e) => panic!("Failed to install the seccomp filter: {e:#}"),
+    }
 
     // Signal readiness to the caller by closing our end of the pipe.
     if let Err(e) = write(ready_fd.as_fd(), "o".as_bytes()) {
