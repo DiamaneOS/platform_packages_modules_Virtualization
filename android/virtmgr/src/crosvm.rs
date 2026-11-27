@@ -1096,7 +1096,7 @@ impl CrosvmCommand {
             return;
         }
         // crosvm's aarch64 RAM region starts at 0x8000_0000 and holds the VM's memory and the ramdump reserve. The
-        // bounce buffers (--swiotlb, shared with Android) and the firmware region stay ordinary memory.
+        // firmware region and the bounce buffers follow below.
         const AARCH64_PHYS_MEM_START: u64 = 0x8000_0000;
         let memory_mib: u32 =
             config.memoryMib.try_into().ok().and_then(NonZeroU32::new).map_or(256, NonZeroU32::get);
@@ -1107,6 +1107,43 @@ impl CrosvmCommand {
                 "--file-backed-mapping",
                 &format!("{path},addr={AARCH64_PHYS_MEM_START:#x},size={ram:#x},rw,ram"),
             ]);
+        }
+        // The pVM firmware region (4 MiB below the RAM, lent like the RAM) from the pool too, when the VM runs pvmfw
+        // and the pool has room now: two 2 MiB blocks instead of up to 1024 pieces of ordinary memory, which the
+        // hypervisor lends at the start and reclaims at the end piece by piece. Never waited for.
+        const AARCH64_PROTECTED_VM_FW_SIZE: u64 = 4 << 20;
+        const AARCH64_PROTECTED_VM_FW_START: u64 = AARCH64_PHYS_MEM_START - AARCH64_PROTECTED_VM_FW_SIZE;
+        let runs_pvmfw = matches!(
+            system_properties::read(SYSPROP_CUSTOM_PVMFW_PATH),
+            Ok(p) if p.as_deref() != Some("none")
+        );
+        if runs_pvmfw {
+            let fw = crate::vm_pool::take_now(AARCH64_PROTECTED_VM_FW_SIZE, "firmware region");
+            if let Some(file) = fw {
+                let path = self.add_preserved_fd(file);
+                self.args([
+                    "--file-backed-mapping",
+                    &format!(
+                        "{path},addr={AARCH64_PROTECTED_VM_FW_START:#x},size={AARCH64_PROTECTED_VM_FW_SIZE:#x},rw,ram"
+                    ),
+                ]);
+            }
+        }
+        // The bounce buffers (--swiotlb) from the pool too, when it has room now: a few 2 MiB blocks instead of up to
+        // one piece per page. On Gunyah crosvm places them at the end of --mem (aarch64 get_swiotlb_addr), right after
+        // the RAM and the ramdump reserve, and shares that region with the VM, never lends it: crosvm reads and writes
+        // the virtio buffers there. The file is this VM's alone and the kernel zeroes it when crosvm lets it go.
+        // Never waited for.
+        let swiotlb = u64::from(Self::get_swiotlb_mib(config)) << 20;
+        if swiotlb > 0 {
+            if let Some(file) = crate::vm_pool::take_now(swiotlb, "bounce buffers") {
+                let path = self.add_preserved_fd(file);
+                let addr = AARCH64_PHYS_MEM_START + ram;
+                self.args([
+                    "--file-backed-mapping",
+                    &format!("{path},addr={addr:#x},size={swiotlb:#x},rw,ram"),
+                ]);
+            }
         }
     }
 
