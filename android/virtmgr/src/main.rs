@@ -20,6 +20,11 @@ mod composite;
 mod crosvm;
 mod debug_config;
 mod dt_overlay;
+// DiamaneOS: the filesystem VM's hosts and what they may ask for (fsvm_client.rs).
+mod fsvm_client;
+mod fsvm_instance;
+// DiamaneOS: a guest's console and log output for logcat, bounded (guest_log.rs).
+mod guest_log;
 mod host_services;
 mod payload;
 // DiamaneOS: the VM manager's seccomp filter (seccomp.rs).
