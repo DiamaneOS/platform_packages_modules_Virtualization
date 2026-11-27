@@ -896,6 +896,11 @@ public final class VirtualMachineConfig {
                 config.cpuOptions.cpuTopology = CpuOptions.CpuTopology.cpuCount(1);
                 break;
         }
+        // DiamaneOS: a raw VM's explicit vCPU count, checked by the VM manager against the host's CPUs.
+        if (customImageConfig.getCpuCount() > 0) {
+            config.cpuOptions.cpuTopology =
+                    CpuOptions.CpuTopology.cpuCount(customImageConfig.getCpuCount());
+        }
         config.consoleInputDevice = mConsoleInputDevice;
         config.devices = AssignedDevices.devices(EMPTY_STRING_ARRAY);
         config.platformVersion = "~1.0";
